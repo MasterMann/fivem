@@ -19,13 +19,23 @@
 
 #include <Error.h>
 
+#include <CoreConsole.h>
+
 #include <IteratorView.h>
 #include <ICoreGameInit.h>
+#include <GameInit.h>
 
 #include <MinHook.h>
 
+#include <CrossBuildRuntime.h>
+
+#ifdef GTA_FIVE
 static void(*dataFileMgr__loadDat)(void*, const char*, bool);
 static void(*dataFileMgr__loadDefDat)(void*, const char*, bool);
+#elif IS_RDR3
+static void(*dataFileMgr__loadDat)(void*, const char*, bool, void*);
+static void(*dataFileMgr__loadDefDat)(void*, const char*, bool, void*);
+#endif
 
 static std::vector<std::string> g_beforeLevelMetas;
 static std::vector<std::string> g_afterLevelMetas;
@@ -51,6 +61,9 @@ struct DataFileEntry
 	char pad2[10];
 };
 
+static void* g_dataFileMgr;
+
+#ifdef GTA_FIVE
 static void LoadDats(void* dataFileMgr, const char* name, bool enabled)
 {
 	dataFileMgr__loadDat(dataFileMgr, "citizen:/citizen.meta", enabled);
@@ -71,8 +84,6 @@ static void LoadDats(void* dataFileMgr, const char* name, bool enabled)
 	}
 }
 
-static void* g_dataFileMgr;
-
 static void LoadDefDats(void* dataFileMgr, const char* name, bool enabled)
 {
 	//dataFileMgr__loadDefDat(dataFileMgr, "citizen:/citizen.meta", enabled);
@@ -80,11 +91,46 @@ static void LoadDefDats(void* dataFileMgr, const char* name, bool enabled)
 	g_dataFileMgr = dataFileMgr;
 
 	// load before-level metas
-	trace("LoadDefDats: %s\n", name);
+	trace("Loading content XML: %s\n", name);
 
 	// load the level
 	dataFileMgr__loadDefDat(dataFileMgr, name, enabled);
 }
+
+#elif IS_RDR3
+static void LoadDats(void* dataFileMgr, const char* name, bool enabled, void* unk)
+{
+	dataFileMgr__loadDat(dataFileMgr, "citizen:/citizen.meta", enabled, unk);
+
+	// load before-level metas
+	for (const auto& meta : g_beforeLevelMetas)
+	{
+		dataFileMgr__loadDat(dataFileMgr, meta.c_str(), enabled, unk);
+	}
+
+	// load the level
+	dataFileMgr__loadDat(dataFileMgr, name, enabled, unk);
+
+	// load after-level metas
+	for (const auto& meta : g_afterLevelMetas)
+	{
+		dataFileMgr__loadDat(dataFileMgr, meta.c_str(), enabled, unk);
+	}
+}
+
+static void LoadDefDats(void* dataFileMgr, const char* name, bool enabled, void* unk)
+{
+	//dataFileMgr__loadDefDat(dataFileMgr, "citizen:/citizen.meta", enabled);
+
+	g_dataFileMgr = dataFileMgr;
+
+	// load before-level metas
+	trace("Loading content XML: %s\n", name);
+
+	// load the level
+	dataFileMgr__loadDefDat(dataFileMgr, name, enabled, unk);
+}
+#endif
 
 static std::vector<std::string> g_oldEntryList;
 
@@ -125,11 +171,21 @@ static auto SafeCall(const T& fn, const char* whatPtr = nullptr)
 #endif
 }
 
+#ifdef GTA_FIVE
 struct EnumEntry
 {
 	uint32_t hash;
 	uint32_t index;
 };
+#elif IS_RDR3
+struct EnumEntry
+{
+	uint32_t hash;
+	char pad1[4];
+	uint32_t index;
+	char pad2[4];
+};
+#endif
 
 static EnumEntry* g_dataFileTypes;
 
@@ -137,7 +193,18 @@ static int LookupDataFileType(const std::string& type)
 {
 	uint32_t thisHash = HashRageString(boost::to_upper_copy(type).c_str());
 
-	for (size_t i = 0; i < 0xC9; i++)
+#ifdef GTA_FIVE
+	int typesCount = 0xC9;
+
+	if (xbr::IsGameBuildOrGreater<2189>())
+	{
+		typesCount = 0xCB;
+	}
+#elif IS_RDR3
+	int typesCount = 0x18B;
+#endif
+
+	for (size_t i = 0; i < typesCount; i++)
 	{
 		auto entry = &g_dataFileTypes[i];
 
@@ -170,27 +237,47 @@ public:
 
 static hook::cdecl_stub<void(DataFileEntry* entry)> _addPackfile([]()
 {
+#ifdef GTA_FIVE
 	return hook::get_call(hook::get_pattern("EB 15 48 8B 0B 40 38 7B 0C 74 07 E8", 11));
+#elif IS_RDR3
+	return hook::get_call(hook::get_pattern("48 8B 0B 40 38 7B ? 74 ? E8 ? ? ? ? EB", 9));
+#endif
 });
 
 static hook::cdecl_stub<void(DataFileEntry* entry)> _removePackfile([]()
 {
+#ifdef GTA_FIVE
 	return hook::get_call(hook::get_pattern("EB 15 48 8B 0B 40 38 7B 0C 74 07 E8", 18));
+#elif IS_RDR3
+	return hook::get_call(hook::get_pattern("48 8B 0B 40 38 7B ? 74 ? E8 ? ? ? ? EB", 16));
+#endif
 });
 
 static hook::cdecl_stub<void(void*)> _initManifestChunk([]()
 {
+#ifdef GTA_FIVE
 	return hook::get_pattern("48 8D 4F 10 B2 01 48 89 2F", -0x2E);
+#elif IS_RDR3
+	return hook::get_pattern("75 ? 48 8B 09 E8 ? ? ? ? 48 8D 4B 10 48", -22);
+#endif
 });
 
 static hook::cdecl_stub<void(void*)> _loadManifestChunk([]()
 {
+#ifdef GTA_FIVE
 	return hook::get_call(hook::get_pattern("45 38 AE C0 00 00 00 0F 95 C3 E8", -5));
+#elif IS_RDR3
+	return hook::get_call(hook::get_pattern("41 8B 06 48 8D 95 B8 02 00 00 48", 23));
+#endif
 });
 
 static hook::cdecl_stub<void(void*)> _clearManifestChunk([]()
 {
+#ifdef GTA_FIVE
 	return hook::get_pattern("33 FF 48 8D 4B 10 B2 01", -0x15);
+#elif IS_RDR3
+	return hook::get_call(hook::get_pattern("F6 44 24 70 04 74 ? 80 3D ? ? ? ? 00 74", 35));
+#endif
 });
 
 static void* manifestChunkPtr;
@@ -215,9 +302,15 @@ bool CfxPackfileMounter::UnmountFile(DataFileEntry* entry)
 }
 
 static void** g_extraContentManager;
+
+#ifdef GTA_FIVE
 static void(*g_disableContentGroup)(void*, uint32_t);
 static void(*g_enableContentGroup)(void*, uint32_t);
 static void(*g_clearContentCache)(int);
+#elif IS_RDR3
+static void(*g_disableContentGroup)(void*, const uint32_t&);
+static void(*g_enableContentGroup)(void*, const uint32_t&);
+#endif
 
 static CfxPackfileMounter g_staticRpfMounter;
 
@@ -229,8 +322,19 @@ static CDataFileMountInterface* LookupDataFileMounter(const std::string& type);
 
 static hook::cdecl_stub<bool(void* streaming, int idx)> _isResourceNotCached([]()
 {
+#ifdef GTA_FIVE
 	return hook::get_pattern("74 07 8A 40 48 24 01 EB 02 B0 01", -0x1B);
+#elif IS_RDR3
+	return hook::get_pattern("74 07 8A 40 76 24 01 EB 02 B0 01", -0x1B);
+#endif
 });
+
+#ifdef IS_RDR3
+static hook::cdecl_stub<void()> _initFuncCoverPointManagerSessionReload([]()
+{
+	return hook::get_pattern("74 1C 80 B8 72 05 00 00 00 74", -14);
+});
+#endif
 
 static bool g_reloadMapStore = false;
 
@@ -238,6 +342,8 @@ static std::set<std::string> loadedCollisions;
 
 int GetDummyCollectionIndexByTag(const std::string& tag);
 extern std::unordered_map<int, std::string> g_handlesToTag;
+
+fwEvent<> OnReloadMapStore;
 
 static void ReloadMapStore()
 {
@@ -261,8 +367,14 @@ static void ReloadMapStore()
 				}
 
 				auto mgr = streaming::Manager::GetInstance();
+				auto relId = obj - streaming::Manager::GetInstance()->moduleMgr.GetStreamingModule("ybn")->baseIdx;
 
-				if (_isResourceNotCached(mgr, obj) || GetDummyCollectionIndexByTag(g_handlesToTag[mgr->Entries[obj].handle]) == -1)
+				if (
+					_isResourceNotCached(mgr, obj)
+#ifdef GTA_FIVE
+					|| GetDummyCollectionIndexByTag(g_handlesToTag[mgr->Entries[obj].handle]) == -1
+#endif
+				)
 				{
 					mgr->RequestObject(obj, 0);
 
@@ -272,22 +384,35 @@ static void ReloadMapStore()
 
 					loadedCollisions.insert(file);
 
-					trace("Loaded %s (id %d)\n", file, obj);
+					trace("Loaded %s (id %d)\n", file, relId);
 				}
 				else
 				{
-					trace("Skipped %s - it's cached! (id %d)\n", file, obj);
+					trace("Skipped %s - it's cached! (id %d)\n", file, relId);
 				}
 			}
 		}
 	});
 
+	OnReloadMapStore();
+
 	// workaround by unloading/reloading MP map group
 	g_disableContentGroup(*g_extraContentManager, 0xBCC89179); // GROUP_MAP
+
+	// again for enablement
+	OnReloadMapStore();
+
 	g_enableContentGroup(*g_extraContentManager, 0xBCC89179);
 
+#ifdef GTA_FIVE
 	g_clearContentCache(0);
+#elif IS_RDR3
+	_initFuncCoverPointManagerSessionReload();
+#endif
 
+	loadedCollisions.clear();
+
+#ifdef GTA_FIVE
 	// load gtxd files
 	for (auto& file : g_gtxdFiles)
 	{
@@ -302,6 +427,7 @@ static void ReloadMapStore()
 
 		trace("Mounted gtxd parenting data %s\n", file);
 	}
+#endif
 
 	g_reloadMapStore = false;
 }
@@ -336,7 +462,9 @@ public:
 
 static CfxPseudoMounter g_staticPseudoMounter;
 
+#ifdef GTA_FIVE
 void LoadCache(const char* tagName);
+#endif
 void LoadManifest(const char* tagName);
 
 class CfxCacheMounter : public CDataFileMountInterface
@@ -345,7 +473,9 @@ public:
 	virtual bool MountFile(DataFileEntry* entry) override
 	{
 		LoadManifest(entry->name);
+#ifdef GTA_FIVE
 		LoadCache(entry->name);
+#endif
 
 		return true;
 	}
@@ -358,7 +488,203 @@ public:
 
 static CfxCacheMounter g_staticCacheMounter;
 
+struct IgnoreCaseLess
+{
+	inline bool operator()(const std::string& left, const std::string& right) const
+	{
+		return _stricmp(left.c_str(), right.c_str()) < 0;
+	}
+};
+
 static CDataFileMountInterface** g_dataFileMounters;
+
+#ifdef GTA_FIVE
+// TODO: this might need to be a ref counter instead?
+static std::set<std::string, IgnoreCaseLess> g_permanentItyps;
+static std::map<uint32_t, std::string> g_itypHashList;
+
+class CfxProxyItypMounter : public CDataFileMountInterface
+{
+private:
+	std::string ParseBaseName(DataFileEntry* entry)
+	{
+		char baseName[256];
+		char* sp = strrchr(entry->name, '/');
+		strcpy_s(baseName, sp ? sp + 1 : entry->name);
+
+		auto dp = strrchr(baseName, '.');
+
+		if (dp)
+		{
+			dp[0] = '\0';
+		}
+
+		return baseName;
+	}
+
+public:
+	virtual bool MountFile(DataFileEntry* entry) override
+	{
+		// parse dir/dir/blah.ityp into blah
+		std::string baseName = ParseBaseName(entry);
+
+		g_itypHashList.insert({ HashString(baseName.c_str()), baseName });
+
+		uint32_t slotId;
+
+		auto module = streaming::Manager::GetInstance()->moduleMgr.GetStreamingModule("ytyp");
+		if (*module->FindSlot(&slotId, baseName.c_str()) != -1)
+		{
+			auto refPool = (atPoolBase*)((char*)module + 56);
+			auto refPtr = refPool->GetAt<char>(slotId);
+
+			if (refPtr)
+			{
+				uint16_t* flags = (uint16_t*)(refPtr + 16);
+
+				if (*flags & 4)
+				{
+					*flags &= ~0x14;
+
+					trace("Removing existing #typ %s\n", baseName);
+
+					g_permanentItyps.insert(baseName);
+
+					streaming::Manager::GetInstance()->ReleaseObject(slotId + module->baseIdx);
+				}
+			}
+		}
+
+		g_dataFileMounters[174]->MountFile(entry);
+
+		return true;
+	}
+
+	virtual bool UnmountFile(DataFileEntry* entry) override
+	{
+		g_dataFileMounters[174]->UnmountFile(entry);
+
+		std::string baseName = ParseBaseName(entry);
+
+		uint32_t slotId;
+
+		auto module = streaming::Manager::GetInstance()->moduleMgr.GetStreamingModule("ytyp");
+		if (*module->FindSlot(&slotId, baseName.c_str()) != -1)
+		{
+			if (g_permanentItyps.find(baseName) != g_permanentItyps.end())
+			{
+				trace("Loading old #typ %s\n", baseName);
+
+				g_permanentItyps.erase(baseName);
+
+				streaming::Manager::GetInstance()->RequestObject(slotId + module->baseIdx, 7);
+
+				auto refPool = (atPoolBase*)((char*)module + 56);
+				auto refPtr = refPool->GetAt<char>(slotId);
+
+				if (refPtr)
+				{
+					*(uint16_t*)(refPtr + 16) |= 4;
+				}
+			}
+		}
+
+		return true;
+	}
+};
+
+static CfxProxyItypMounter g_proxyDlcItypMounter;
+
+struct CInteriorProxy
+{
+	virtual ~CInteriorProxy() = 0;
+
+	uint32_t mapData;
+};
+
+static hook::thiscall_stub<int(void* store, int* out, uint32_t* inHash)> _getIndexByKey([]()
+{
+	return hook::get_pattern("39 1C 91 74 4F 44 8B 4C 91 08 45 3B", -0x34);
+});
+
+#include <atPool.h>
+
+static atPool<CInteriorProxy>** g_interiorProxyPool;
+
+struct ProxyFile
+{
+	uint32_t startAt;
+	uint32_t hash;
+	atArray<uint32_t> proxyHashes;
+};
+
+static atArray<ProxyFile>* g_interiorProxyArray;
+// 1604: 0x142544440;
+
+class CfxProxyInteriorOrderMounter : public CDataFileMountInterface
+{
+public:
+	virtual bool MountFile(DataFileEntry* entry) override
+	{
+		g_dataFileMounters[173]->MountFile(entry);
+
+		return true;
+	}
+
+	virtual bool UnmountFile(DataFileEntry* entry) override
+	{
+		uint32_t entryHash = HashString(entry->name);
+
+		auto mapDataStore = streaming::Manager::GetInstance()->moduleMgr.GetStreamingModule("ymap");
+
+		for (auto& entry : *g_interiorProxyArray)
+		{
+			if (entry.hash == entryHash)
+			{
+				int i = entry.startAt;
+
+				for (auto& proxyHash : entry.proxyHashes)
+				{
+					auto proxy = (*g_interiorProxyPool)->GetAt(i);
+
+					if (proxy)
+					{
+						bool can = true;
+
+						if (proxy->mapData)
+						{
+							auto pool = (atPoolBase*)((char*)mapDataStore + 56);
+							auto entry = pool->GetAt<char>(proxy->mapData);
+
+							if (entry && (*(uint32_t*)(entry + 32) & 0xC00) == 0x800)
+							{
+								can = false;
+							}
+						}
+
+						if (can || streaming::IsStreamerShuttingDown())
+						{
+							// goodbye, interior proxy
+							trace("deleted interior proxy %08x\n", proxyHash);
+							delete proxy;
+						}
+					}
+					else
+					{
+						trace(":( didn't find interior proxy %08x\n", proxyHash);
+					}
+
+					i++;
+				}
+			}
+		}
+
+		return true;
+	}
+};
+
+static CfxProxyInteriorOrderMounter g_proxyInteriorOrderMounter;
+#endif
 
 static CDataFileMountInterface* LookupDataFileMounter(const std::string& type)
 {
@@ -384,11 +710,23 @@ static CDataFileMountInterface* LookupDataFileMounter(const std::string& type)
 		return &g_staticRpfMounter;
 	}
 
+#ifdef GTA_FIVE
 	// don't allow TEXTFILE_METAFILE entries (these don't work and will fail to unload)
 	if (fileType == 160) // TEXTFILE_METAFILE 
 	{
 		return nullptr;
 	}
+
+	if (fileType == 173) // INTERIOR_PROXY_ORDER_FILE
+	{
+		return &g_proxyInteriorOrderMounter;
+	}
+
+	if (fileType == 174) // DLC_ITYP_REQUEST
+	{
+		return &g_proxyDlcItypMounter;
+	}
+#endif
 
 	return g_dataFileMounters[fileType];
 }
@@ -414,7 +752,11 @@ static void HandleDataFile(const std::pair<std::string, std::string>& dataFile, 
 
 	if (mounter)
 	{
+#ifdef GTA_FIVE
 		std::string className = typeid(*mounter).name();
+#else
+		std::string className = std::to_string((uint64_t)mounter);
+#endif
 
 		DataFileEntry entry;
 		memset(&entry, 0, sizeof(entry));
@@ -446,16 +788,45 @@ inline void HandleDataFileList(const TList& list, const TFn& fn, const char* op 
 	}
 }
 
-void LoadStreamingFiles(bool earlyLoad = false);
+#ifdef GTA_FIVE
+template<typename TFn, typename TList>
+inline void HandleDataFileListWithTypes(TList& list, const TFn& fn, const std::set<int>& types, const char* op = "loading")
+{
+	for (auto it = list.begin(); it != list.end(); )
+	{
+		if (types.find(LookupDataFileType(it->first)) != types.end())
+		{
+			HandleDataFile(*it, fn, op);
+
+			it = list.erase(it);
+		}
+		else
+		{
+			++it;
+		}
+	}
+}
+#endif
+
+enum class LoadType
+{
+	BeforeMapLoad,
+	BeforeSession,
+	AfterSession
+};
+
+void LoadStreamingFiles(LoadType loadType = LoadType::AfterSession);
 
 static LONG FilterUnmountOperation(DataFileEntry& entry)
 {
+#ifdef GTA_FIVE
 	if (entry.type == 174) // DLC_ITYP_REQUEST
 	{
 		trace("failed to unload DLC_ITYP_REQUEST %s\n", entry.name);
 
 		return EXCEPTION_EXECUTE_HANDLER;
 	}
+#endif
 
 	return EXCEPTION_CONTINUE_SEARCH;
 }
@@ -474,11 +845,13 @@ namespace streaming
 
 	void DLL_EXPORT AddDataFileToLoadList(const std::string& type, const std::string& path)
 	{
+#ifdef GTA_FIVE
 		if (type == "GTXD_PARENTING_DATA")
 		{
 			g_gtxdFiles.push_back(path);
 			return;
 		}
+#endif
 
 		g_dataFiles.push_back({ type, path });
 
@@ -493,11 +866,13 @@ namespace streaming
 	{
 		auto dataFilePair = std::make_pair(type, path);
 
+		std::remove(g_dataFiles.begin(), g_dataFiles.end(), dataFilePair);
+
 		if (std::find(g_loadedDataFiles.begin(), g_loadedDataFiles.end(), dataFilePair) == g_loadedDataFiles.end())
 		{
 			return;
 		}
-		
+
 		std::remove(g_loadedDataFiles.begin(), g_loadedDataFiles.end(), dataFilePair);
 
 		if (Instance<ICoreGameInit>::Get()->GetGameLoaded())
@@ -519,19 +894,24 @@ namespace streaming
 	}
 }
 
-static hook::cdecl_stub<rage::fiCollection*()> getRawStreamer([]()
+static hook::cdecl_stub<rage::fiCollection* ()> getRawStreamer([]()
 {
+#ifdef GTA_FIVE
 	return hook::get_call(hook::get_pattern("48 8B D3 4C 8B 00 48 8B C8 41 FF 90 ? 01 00 00", -5));
+#elif IS_RDR3
+	return hook::get_call(hook::get_pattern("45 33 C0 48 8B D6 41 FF 91 ? ? ? ? 8B E8", -11));
+#endif
 });
 
 #include <unordered_set>
 
 static std::set<std::tuple<std::string, std::string>> g_customStreamingFiles;
-static std::set<std::string> g_customStreamingFileRefs;
+std::set<std::string> g_customStreamingFileRefs;
 static std::map<std::string, std::vector<std::string>, std::less<>> g_customStreamingFilesByTag;
 static std::unordered_map<int, std::list<uint32_t>> g_handleStack;
 static std::set<std::pair<streaming::strStreamingModule*, int>> g_pendingRemovals;
 std::unordered_map<int, std::string> g_handlesToTag;
+static std::set<std::string> g_pedsToRegister;
 
 static std::unordered_set<int> g_ourIndexes;
 
@@ -554,12 +934,41 @@ static std::string GetBaseName(const std::string& name)
 	return retval;
 }
 
-static void LoadStreamingFiles(bool earlyLoad)
+namespace rage
+{
+	static hook::cdecl_stub<void(uint16_t)> pgRawStreamerInvalidateEntry([]()
+	{
+#ifdef GTA_FIVE
+		return hook::get_pattern("44 0F B7 C3 41 8B C0 41 81 E0 FF 03 00 00 C1", -0x51);
+#elif IS_RDR3
+		return hook::get_pattern("48 85 D2 75 ? BA ? ? ? ? B9 ? ? ? ? E8", -0x1B);
+#endif
+	});
+}
+
+static void LoadStreamingFiles(LoadType loadType)
 {
 	// register any custom streaming assets
 	for (auto it = g_customStreamingFiles.begin(); it != g_customStreamingFiles.end(); )
 	{
-		auto[file, tag] = *it;
+		auto [file, tag] = *it;
+
+		if (loadType == LoadType::BeforeMapLoad)
+		{
+			// only support tags mod_ and faux_pack
+			if (tag.find("mod_") != 0 && tag.find("faux_pack") != 0)
+			{
+				++it;
+				continue;
+			}
+
+			// don't allow spoofing for a (comp)cache
+			if (file.find("cache:/") != std::string::npos)
+			{
+				++it;
+				continue;
+			}
+		}
 
 		// get basename ('thing.ytd') and asset name ('thing')
 		const char* slashPos = strrchr(file.c_str(), '/');
@@ -592,9 +1001,9 @@ static void LoadStreamingFiles(bool earlyLoad)
 			continue;
 		}
 
-		if (earlyLoad)
+		if (loadType != LoadType::AfterSession)
 		{
-			if (ext == "ymap" || ext == "ytyp")
+			if (ext == "ymap" || ext == "ytyp" || ext == "ybn")
 			{
 				++it;
 				continue;
@@ -610,8 +1019,18 @@ static void LoadStreamingFiles(bool earlyLoad)
 		{
 			// try to create/get an asset in the streaming module
 			// RegisterStreamingFile will still work if one exists as long as the handle remains 0
-			uint32_t strId;
-			strModule->GetOrCreate(&strId, nameWithoutExt.c_str());
+			uint32_t strId = -1;
+
+#ifdef GTA_FIVE
+			strModule->FindSlot(&strId, nameWithoutExt.c_str());
+
+			if (strId == -1)
+			{
+				strModule->FindSlotFromHashKey(&strId, nameWithoutExt.c_str());
+			}
+#elif IS_RDR3
+			strModule->FindSlotFromHashKey(&strId, HashString(nameWithoutExt.c_str()));
+#endif
 
 			g_ourIndexes.insert(strId + strModule->baseIdx);
 			g_pendingRemovals.erase({ strModule, strId });
@@ -627,7 +1046,11 @@ static void LoadStreamingFiles(bool earlyLoad)
 				{
 					auto& entry = cstreaming->Entries[strId + strModule->baseIdx];
 
-					trace("overriding handle for %s (was %x) -> %x\n", baseName, entry.handle, (rawStreamer->GetCollectionId() << 16) | idx);
+#ifdef GTA_FIVE
+					console::DPrintf("gta:streaming:five", "overriding handle for %s (was %x) -> %x\n", baseName, entry.handle, (rawStreamer->GetCollectionId() << 16) | idx);
+#elif IS_RDR3
+					console::DPrintf("gta:streaming:rdr3", "overriding handle for %s (was %x) -> %x\n", baseName, entry.handle, (rawStreamer->GetCollectionId() << 16) | idx);
+#endif
 
 					// if no old handle was saved, save the old handle
 					auto& hs = g_handleStack[strId + strModule->baseIdx];
@@ -654,6 +1077,8 @@ static void LoadStreamingFiles(bool earlyLoad)
 					auto& entry = cstreaming->Entries[fileId];
 					g_handleStack[fileId].push_front(entry.handle);
 
+					rage::pgRawStreamerInvalidateEntry(entry.handle & 0xFFFF);
+
 					g_handlesToTag[entry.handle] = tag;
 				}
 				else
@@ -662,10 +1087,18 @@ static void LoadStreamingFiles(bool earlyLoad)
 				}
 			}
 		}
-		else
+		else if (ext != "ymf")
 		{
 			trace("can't register %s: no streaming module (does this file even belong in stream?)\n", file);
 		}
+
+#ifdef GTA_FIVE
+		// register ped asset
+		if (baseName.find('/') != std::string::npos)
+		{
+			g_pedsToRegister.insert(baseName.substr(0, baseName.find('/')));
+		}
+#endif
 	}
 }
 
@@ -715,29 +1148,9 @@ public:
 		return m_device->ReadBulk(handle, ptr, buffer, toRead);
 	}
 
-	virtual int m_40(int a) override
-	{
-		return m_device->m_40(a);
-	}
-
-	virtual rage::fiDevice* GetUnkDevice() override
-	{
-		return m_device->GetUnkDevice();
-	}
-
-	virtual void m_xx() override
-	{
-		return m_device->m_xx();
-	}
-
 	virtual int32_t GetCollectionId() override
 	{
 		return m_device->GetCollectionId();
-	}
-
-	virtual bool m_ax() override
-	{
-		return m_device->m_ax();
 	}
 
 	virtual uint32_t Write(uint64_t, void*, int) override
@@ -851,11 +1264,17 @@ public:
 	}
 };
 
+#ifdef GTA_FIVE
 static hook::cdecl_stub<void(void*, void* packfile, const char*)> loadManifest([]()
 {
 	return hook::get_pattern("49 8B F0 4C 8B F1 48 85 D2 0F 84", -0x23);
 });
-
+#elif IS_RDR3
+static hook::cdecl_stub<void(void*, void* packfile, const char*, bool)> loadManifest([]()
+{
+	return hook::get_pattern("83 A5 ? ? ? ? 00 E8 ? ? ? ? 48 8B C8 4C", -0x38);
+});
+#endif
 void LoadManifest(const char* tagName)
 {
 	auto range = g_manifestNames.equal_range(tagName);
@@ -869,24 +1288,131 @@ void LoadManifest(const char* tagName)
 		auto rel = new ForcedDevice(rage::fiDevice::GetDevice(name.c_str(), true), name);
 		rage::fiDevice::MountGlobal("localPack:/", rel, true);
 
+#ifdef GTA_FIVE
 		loadManifest(manifestChunkPtr, (void*)1, tagName);
+#elif IS_RDR3
+		loadManifest(manifestChunkPtr, (void*)1, tagName, false);
+#endif
 
 		rage::fiDevice::Unmount("localPack:/");
+
+#ifdef GTA_FIVE
+		struct CItypDependencies
+		{
+			uint32_t itypName;
+			uint32_t manifestFlags;
+
+			atArray<uint32_t> itypDepArray;
+		};
+
+		struct manifestData
+		{
+			char pad[48];
+			atArray<CItypDependencies> itypDependencies;
+		}* manifestChunk = (manifestData*)manifestChunkPtr;
+
+		for (auto& dep : manifestChunk->itypDependencies)
+		{
+			if (auto it = g_itypHashList.find(dep.itypName); it != g_itypHashList.end())
+			{
+				auto name = fmt::sprintf("dummy/%s.ityp", it->second);
+				trace("Fixing manifest-required #typ dependency for %s\n", name);
+
+				auto mounter = LookupDataFileMounter("DLC_ITYP_REQUEST");
+
+				DataFileEntry entry = { 0 };
+				strcpy_s(entry.name, name.c_str());
+
+				mounter->UnmountFile(&entry);
+			}
+		}
+#endif
 
 		_loadManifestChunk(manifestChunkPtr);
 		_clearManifestChunk(manifestChunkPtr);
 	}
 }
 
+#ifdef GTA_FIVE
+#include <EntitySystem.h>
+#include <RageParser.h>
+
+struct CPedModelInfo
+{
+private:
+	uint64_t vtbl;
+	uint8_t pad[16];
+public:
+	uint32_t hash;
+
+private:
+	uint8_t pad2[428];
+
+public:
+	atArray<char> streamFolder;
+
+private:
+	uint8_t pad3[188];
+};
+
+static hook::cdecl_stub<void(fwFactoryBase<fwArchetype>*, atArray<CPedModelInfo*>&)> _getAllPedArchetypes([]()
+{
+	return hook::get_call(hook::get_pattern("44 8B E0 4C 89 6C 24 20 44 89 6C 24 28 E8", 13));
+});
+
+static void RegisterPeds()
+{
+	auto pedArchetypeFactory = (*g_archetypeFactories)[6];
+
+	atArray<CPedModelInfo*> mis;
+	_getAllPedArchetypes(pedArchetypeFactory, mis);
+
+	for (auto mi : mis)
+	{
+		for (const auto& ped : g_pedsToRegister)
+		{
+			if (mi->hash == HashString(ped.c_str()))
+			{
+				mi->streamFolder.Expand(ped.size() + 1);
+
+				strcpy(&mi->streamFolder[0], ped.c_str());
+				mi->streamFolder.m_count = ped.size() + 1;
+			}
+		}
+	}
+}
+#endif
+
 static void LoadDataFiles()
 {
 	trace("Loading mounted data files (total: %d)\n", g_dataFiles.size());
 
-	HandleDataFileList(g_dataFiles, [] (CDataFileMountInterface* mounter, DataFileEntry& entry)
+	// sort data file array by type, a little
+	auto dfSort = [](const std::pair<std::string, std::string>& type)
+	{
+		auto h = HashString(type.first.c_str());
+
+		if (h == HashString("VEHICLE_LAYOUTS_FILE") || h == HashString("HANDLING_FILE"))
+		{
+			return 0;
+		}
+		else
+		{
+			return 100;
+		}
+	};
+
+	// we use stable_sort as equivalent entries need to retain equivalent order
+	std::stable_sort(g_dataFiles.begin(), g_dataFiles.end(), [dfSort](const auto& left, const auto& right)
+	{
+		return dfSort(left) < dfSort(right);
+	});
+
+	HandleDataFileList(g_dataFiles, [](CDataFileMountInterface* mounter, DataFileEntry& entry)
 	{
 		return mounter->MountFile(&entry);
 	});
-	
+
 	g_loadedDataFiles.insert(g_loadedDataFiles.end(), g_dataFiles.begin(), g_dataFiles.end());
 	g_dataFiles.clear();
 
@@ -896,6 +1422,15 @@ static void LoadDataFiles()
 
 		ReloadMapStore();
 	}
+
+#ifdef GTA_FIVE
+	if (!g_pedsToRegister.empty())
+	{
+		RegisterPeds();
+
+		g_pedsToRegister.clear();
+	}
+#endif
 }
 
 DLL_EXPORT void ForceMountDataFile(const std::pair<std::string, std::string>& dataFile)
@@ -921,7 +1456,10 @@ void ForAllStreamingFiles(const std::function<void(const std::string&)>& cb)
 static bool g_reloadStreamingFiles;
 static std::atomic<int> g_lockedStreamingFiles;
 
+#ifdef GTA_FIVE
 void origCfxCollection_AddStreamingFileByTag(const std::string& tag, const std::string& fileName, rage::ResourceFlags flags);
+void origCfxCollection_BackoutStreamingTag(const std::string& tag);
+#endif
 
 void DLL_EXPORT CfxCollection_SetStreamingLoadLocked(bool locked)
 {
@@ -950,7 +1488,26 @@ void DLL_EXPORT CfxCollection_AddStreamingFileByTag(const std::string& tag, cons
 
 	g_reloadStreamingFiles = true;
 
+#ifdef GTA_FIVE
 	origCfxCollection_AddStreamingFileByTag(tag, fileName, flags);
+#endif
+}
+
+void DLL_EXPORT CfxCollection_BackoutStreamingTag(const std::string& tag)
+{
+	// undo whatever AddStreamingFileByTag did
+	for (auto& name : g_customStreamingFilesByTag[tag])
+	{
+		g_customStreamingFiles.erase({ name, tag });
+		g_customStreamingFileRefs.erase(name);
+	}
+
+	g_manifestNames.erase(tag);
+	g_customStreamingFilesByTag.erase(tag);
+
+#ifdef GTA_FIVE
+	origCfxCollection_BackoutStreamingTag(tag);
+#endif
 }
 
 void DLL_EXPORT CfxCollection_RemoveStreamingTag(const std::string& tag)
@@ -980,7 +1537,12 @@ void DLL_EXPORT CfxCollection_RemoveStreamingTag(const std::string& tag)
 		if (strModule)
 		{
 			uint32_t strId;
-			strModule->GetIndexByName(&strId, nameWithoutExt.c_str());
+
+#ifdef GTA_FIVE
+			strModule->FindSlot(&strId, nameWithoutExt.c_str());
+#elif IS_RDR3
+			strModule->FindSlotFromHashKey(&strId, HashString(nameWithoutExt.c_str()));
+#endif
 
 			auto rawStreamer = getRawStreamer();
 			uint32_t idx = (rawStreamer->GetCollectionId() << 16) | rawStreamer->GetEntryByName(file.c_str());
@@ -1010,12 +1572,6 @@ void DLL_EXPORT CfxCollection_RemoveStreamingTag(const std::string& tag)
 				}
 				else
 				{
-					// release the object if it was likely to have been faked
-					if (streaming::IsStreamerShuttingDown())
-					{
-						streaming::Manager::GetInstance()->ReleaseObject(strId + strModule->baseIdx);
-					}
-
 					g_pendingRemovals.insert({ strModule, strId });
 
 					g_customStreamingFileRefs.erase(baseName);
@@ -1040,7 +1596,8 @@ static void UnloadDataFiles()
 	{
 		trace("Unloading data files (%d entries)\n", g_loadedDataFiles.size());
 
-		HandleDataFileList(g_loadedDataFiles, [] (CDataFileMountInterface* mounter, DataFileEntry& entry)
+		HandleDataFileList(g_loadedDataFiles,
+			[](CDataFileMountInterface* mounter, DataFileEntry& entry)
 		{
 			return mounter->UnmountFile(&entry);
 		}, "unloading");
@@ -1049,10 +1606,20 @@ static void UnloadDataFiles()
 	}
 }
 
+#ifdef GTA_FIVE
+static void UnloadDataFilesOfTypes(const std::set<int>& types)
+{
+	HandleDataFileListWithTypes(g_loadedDataFiles, [](CDataFileMountInterface* mounter, DataFileEntry& entry)
+	{
+		return mounter->UnmountFile(&entry);
+	}, types, "pre-unloading");
+}
+
 static hook::cdecl_stub<void()> _unloadMultiplayerContent([]()
 {
 	return hook::get_pattern("01 E8 ? ? ? ? 48 8B 0D ? ? ? ? BA 79", -0x11);
 });
+#endif
 
 static const char* NormalizePath(char* out, const char* in, size_t length)
 {
@@ -1075,7 +1642,9 @@ struct pgRawStreamer
 {
 	struct Entry
 	{
+#ifdef GTA_FIVE
 		char m_pad[24];
+#endif
 		const char* fileName;
 	};
 
@@ -1085,7 +1654,11 @@ struct pgRawStreamer
 
 static const char* pgRawStreamer__GetEntryNameToBuffer(pgRawStreamer* streamer, uint16_t index, char* buffer, int len)
 {
+#ifdef GTA_FIVE
 	const char* fileName = streamer->m_entries[index >> 10][index & 0x3FF].fileName;
+#elif IS_RDR3
+	const char* fileName = streamer->m_entries[index >> 10][5 * (index & 0x3FF) + 4].fileName;
+#endif
 
 	if (fileName == nullptr)
 	{
@@ -1099,7 +1672,8 @@ static const char* pgRawStreamer__GetEntryNameToBuffer(pgRawStreamer* streamer, 
 	return buffer;
 }
 
-static void DisplayRawStreamerError [[noreturn]] (pgRawStreamer* streamer, uint16_t index)
+#ifdef GTA_FIVE
+static void DisplayRawStreamerError [[noreturn]] (pgRawStreamer* streamer, uint16_t index, const char* why)
 {
 	auto streamingMgr = streaming::Manager::GetInstance();
 
@@ -1121,19 +1695,39 @@ static void DisplayRawStreamerError [[noreturn]] (pgRawStreamer* streamer, uint1
 		}
 	}
 
-	FatalError("Invalid pgRawStreamer call - fileName == NULL.\nStreaming index: %d\n%s", index, extraData);
+	FatalError("Invalid pgRawStreamer call - %s.\nStreaming index: %d\n%s", why, index, extraData);
+}
+
+static void ValidateRawStreamerReq(pgRawStreamer* streamer, uint16_t index)
+{
+	uint32_t index0 = index >> 10;
+	uint32_t index1 = index & 0x3FF;
+
+	if (index0 >= std::size(streamer->m_entries))
+	{
+		DisplayRawStreamerError(streamer, index, "index >= size(entries)");
+	}
+
+	auto entryList = streamer->m_entries[index0];
+
+	if (!entryList)
+	{
+		DisplayRawStreamerError(streamer, index, "!entryList");
+	}
+
+	const char* fileName = entryList[index1].fileName;
+
+	if (fileName == nullptr)
+	{
+		DisplayRawStreamerError(streamer, index, "fileName == NULL");
+	}
 }
 
 static int64_t(*g_origOpenCollectionEntry)(pgRawStreamer* streamer, uint16_t index, uint64_t* ptr);
 
 static int64_t pgRawStreamer__OpenCollectionEntry(pgRawStreamer* streamer, uint16_t index, uint64_t* ptr)
 {
-	const char* fileName = streamer->m_entries[index >> 10][index & 0x3FF].fileName;
-
-	if (fileName == nullptr)
-	{
-		DisplayRawStreamerError(streamer, index);
-	}
+	ValidateRawStreamerReq(streamer, index);
 
 	return g_origOpenCollectionEntry(streamer, index, ptr);
 }
@@ -1142,15 +1736,11 @@ static int64_t(*g_origGetEntry)(pgRawStreamer* streamer, uint16_t index);
 
 static int64_t pgRawStreamer__GetEntry(pgRawStreamer* streamer, uint16_t index)
 {
-	const char* fileName = streamer->m_entries[index >> 10][index & 0x3FF].fileName;
-
-	if (fileName == nullptr)
-	{
-		DisplayRawStreamerError(streamer, index);
-	}
+	ValidateRawStreamerReq(streamer, index);
 
 	return g_origGetEntry(streamer, index);
 }
+#endif
 
 static bool g_unloadingCfx;
 
@@ -1163,21 +1753,34 @@ namespace streaming
 }
 
 static void* g_streamingInternals;
+static bool g_lockReload;
 
 static hook::cdecl_stub<void()> _waitUntilStreamerClear([]()
 {
+#ifdef GTA_FIVE
 	return hook::get_call(hook::get_pattern("80 A1 7A 01 00 00 FE 8B EA", 12));
+#elif IS_RDR3
+	return hook::get_call(hook::get_pattern("B1 01 E8 ? ? ? ? B9 FF FF 00 00 E8", -19));
+#endif
 });
 
 static hook::cdecl_stub<void(void*)> _resyncStreamers([]()
 {
+#ifdef GTA_FIVE
 	return hook::get_call(hook::get_pattern("80 A1 7A 01 00 00 FE 8B EA", 24));
+#elif IS_RDR3
+	return hook::get_call(hook::get_pattern("B1 01 E8 ? ? ? ? B9 FF FF 00 00 E8", -24));
+#endif
 });
 
 static hook::cdecl_stub<void()> _unloadTextureLODs([]()
 {
+#ifdef GTA_FIVE
 	// there's two of these, both seem to do approximately the same thing, but the first one we want
 	return hook::get_pattern("48 85 DB 75 1B 8D 47 01 49 8D", -0x84);
+#elif IS_RDR3
+	return hook::get_pattern("49 8B 1C C2 48 85 DB 75 ? 48", -54);
+#endif
 });
 
 static void SafelyDrainStreamer()
@@ -1199,6 +1802,7 @@ static void SafelyDrainStreamer()
 	trace("Shutdown: streamer tasks done\n");
 }
 
+#ifdef GTA_FIVE
 static void(*g_origAddMapBoolEntry)(void* map, int* index, bool* value);
 
 void WrapAddMapBoolEntry(void* map, int* index, bool* value)
@@ -1218,7 +1822,7 @@ static void ExecuteGroupForWeaponInfo(void* mgr, uint32_t hashValue, bool value)
 
 	for (auto it = g_loadedDataFiles.begin(); it != g_loadedDataFiles.end();)
 	{
-		auto[fileType, fileName] = *it;
+		auto [fileType, fileName] = *it;
 
 		if (fileType == "WEAPONINFO_FILE_PATCH" || fileType == "WEAPONINFO_FILE")
 		{
@@ -1240,8 +1844,7 @@ static void(*g_origUnloadWeaponInfos)();
 
 static hook::cdecl_stub<void(void*)> wib_ctor([]()
 {
-	// 1604
-	return (void*)0x140E78710;
+	return hook::get_pattern("41 8D 50 01 48 8D 41", -0x35);
 });
 
 struct CWeaponInfoBlob
@@ -1261,7 +1864,7 @@ static void UnloadWeaponInfosStub()
 	g_origUnloadWeaponInfos();
 
 	g_weaponInfoArray->Clear();
-	g_weaponInfoArray->Expand(0x80);
+	g_weaponInfoArray->Expand(kNumWeaponInfoBlobs);
 }
 
 static hook::cdecl_stub<void(int32_t)> rage__fwArchetypeManager__FreeArchetypes([]()
@@ -1298,16 +1901,336 @@ void fwMapTypesStore__Unload(char* assetStore, uint32_t index)
 	}
 }
 
-#include <GameInit.h>
+std::unordered_set<std::string> g_streamingSuffixSet;
 
-static bool g_lockReload;
-
-static HookFunction hookFunction([] ()
+static void ModifyHierarchyStatusHook(streaming::strStreamingModule* module, int idx, int* status)
 {
+	if (*status == 1 && g_ourIndexes.find(module->baseIdx + idx) != g_ourIndexes.end())
+	{
+		auto thisName = streaming::GetStreamingNameForIndex(module->baseIdx + idx);
+
+		// if this is, say, vb_02.ymap, and we also loaded hei_vb_02.ymap, skip this file
+		if (g_streamingSuffixSet.find(thisName) == g_streamingSuffixSet.end())
+		{
+			*status = 2;
+		}
+	}
+}
+
+static bool(*g_orig_fwStaticBoundsStore__ModifyHierarchyStatus)(streaming::strStreamingModule* module, int idx, int status);
+
+static bool fwStaticBoundsStore__ModifyHierarchyStatus(streaming::strStreamingModule* module, int idx, int status)
+{
+	// don't disable hierarchy overlay for any custom overrides
+	ModifyHierarchyStatusHook(module, idx, &status);
+
+	return g_orig_fwStaticBoundsStore__ModifyHierarchyStatus(module, idx, status);
+}
+
+static bool(*g_orig_fwMapDataStore__ModifyHierarchyStatusRecursive)(streaming::strStreamingModule* module, int idx, int status);
+
+static bool fwMapDataStore__ModifyHierarchyStatusRecursive(streaming::strStreamingModule* module, int idx, int status)
+{
+	// don't disable hierarchy overlay for any custom overrides
+	ModifyHierarchyStatusHook(module, idx, &status);
+
+	return g_orig_fwMapDataStore__ModifyHierarchyStatusRecursive(module, idx, status);
+}
+
+static void (*g_origLoadReplayDlc)(void* ecw);
+
+static void LoadReplayDlc(void* ecw)
+{
+	g_lockReload = false;
+
+	LoadStreamingFiles(LoadType::BeforeSession);
+
+	g_origLoadReplayDlc(ecw);
+
+	LoadStreamingFiles(LoadType::AfterSession);
+	LoadDataFiles();
+}
+
+static void (*g_origfwMapTypes__ConstructArchetypes)(void* mapTypes, int32_t idx);
+
+static void fwMapTypes__ConstructArchetypesStub(void* mapTypes, int32_t idx)
+{
+	// free this archetype file since we're recreating it anyway
+	// this should be safe, as an asset won't get loaded without it having been unloaded before
+	rage__fwArchetypeManager__FreeArchetypes(idx);
+
+	g_origfwMapTypes__ConstructArchetypes(mapTypes, idx);
+}
+
+static void (*g_origfwMapDataStore__FinishLoading)(void* store, int32_t idx, CMapData** data);
+
+static void fwMapDataStore__FinishLoadingHook(streaming::strStreamingModule* store, int32_t idx, CMapData** data)
+{
+	CMapData* mapData = *data;
+
+	static_assert(offsetof(CMapData, name) == 8, "CMapData::name");
+
+	for (fwEntityDef* entity : mapData->entities)
+	{
+		if (entity->GetTypeIdentifier()->m_nameHash == HashRageString("CMloInstanceDef"))
+		{
+			if (!(mapData->contentFlags & 8))
+			{
+				trace("Fixed fwMapData contentFlags (missing 'interior' flag) in %s.\n", streaming::GetStreamingNameForIndex(idx + store->baseIdx));
+				mapData->contentFlags |= 8;
+			}
+		}
+	}
+
+	return g_origfwMapDataStore__FinishLoading(store, idx, data);
+}
+#endif
+
+static bool ret0()
+{
+	return false;
+}
+
+#ifdef GTA_FIVE
+static void (*g_origLoadVehicleMeta)(DataFileEntry* entry, bool notMapTypes, uint32_t modelHash);
+static void (*g_origAddArchetype)(fwArchetype*, uint32_t typesHash);
+
+static void GetTxdRelationships(std::map<int, int>& map)
+{
+	static auto module = streaming::Manager::GetInstance()->moduleMgr.GetStreamingModule("ytd");
+	
+	atPoolBase* entryPool = (atPoolBase*)((char*)module + 56);
+	for (size_t i = 0; i < entryPool->GetSize(); i++)
+	{
+		if (auto entry = entryPool->GetAt<char>(i); entry)
+		{
+			int idx = -1;
+
+			if (xbr::IsGameBuildOrGreater<1868>())
+			{
+				idx = *(int32_t*)(entry + 16);
+			}
+			else
+			{
+				idx = *(uint16_t*)(entry + 16);
+
+				if (idx == 0xFFFF)
+				{
+					idx = -1;
+				}
+			}
+
+			if (idx >= 0)
+			{
+				map[i] = idx;
+			}
+		}
+	}
+}
+
+static std::multimap<uint32_t, std::pair<int, int>> g_undoTxdRelationships;
+static thread_local bool overrideTypesHash;
+
+#include <VFSManager.h>
+
+// since algorithms are hard, this
+// copied from SO: https://stackoverflow.com/a/5816029
+static void calc_z(std::string& s, std::vector<int>& z)
+{
+	int len = s.size();
+	z.resize(len);
+
+	int l = 0, r = 0;
+	for (int i = 1; i < len; ++i)
+		if (z[i - l] + i <= r)
+			z[i] = z[i - l];
+		else
+		{
+			l = i;
+			if (i > r)
+				r = i;
+			for (z[i] = r - i; r < len; ++r, ++z[i])
+				if (s[r] != s[z[i]])
+					break;
+			--r;
+		}
+}
+
+static std::unordered_set<uint32_t> g_hashes;
+
+static void LoadVehicleMetaForDlc(DataFileEntry* entry, bool notMapTypes, uint32_t modelHash)
+{
+	// try logging any and all txdstore relationships we made, to find any differences
+	std::map<int, int> txdRelationships;
+	GetTxdRelationships(txdRelationships);
+
+	// try to guess the amount of entries this meta file has
+	int entryCount = 16;
+
+	{
+		auto stream = vfs::OpenRead(entry->name);
+
+		if (stream.GetRef())
+		{
+			auto text = stream->ReadToEnd();
+			std::string textString{ text.begin(), text.end() };
+
+			std::string substring = "</modelName>";
+
+			// safe margin to start
+			entryCount = 4;
+
+			// more SO code: https://stackoverflow.com/a/5816029
+			textString = substring + textString;
+
+			std::vector<int> z;
+			calc_z(textString, z);
+
+			for (int i = substring.size(); i < textString.size(); ++i)
+			{
+				if (z[i] >= substring.size())
+				{
+					entryCount++;
+				}
+			}
+		}
+	}
+
+	// we use DLC name as hash
+	auto entryHash = HashString(entry->name);
+	g_archetypeFactories->Get(5)->GetOrCreate(entryHash, entryCount);
+
+	overrideTypesHash = true;
+	g_origLoadVehicleMeta(entry, notMapTypes, entryHash);
+	g_hashes.insert(entryHash);
+	overrideTypesHash = false;
+
+	// get the txdstore relationships, again
+	std::map<int, int> txdRelationshipsAfter;
+	GetTxdRelationships(txdRelationshipsAfter);
+
+	// find a difference
+	std::vector<std::pair<int, int>> newRelationships;
+	std::set_difference(txdRelationshipsAfter.begin(), txdRelationshipsAfter.end(), txdRelationships.begin(), txdRelationships.end(), std::back_inserter(newRelationships));
+
+	for (auto& relationship : newRelationships)
+	{
+		if (auto relIt = txdRelationships.find(relationship.first); relIt != txdRelationships.end())
+		{
+			g_undoTxdRelationships.emplace(entryHash, *relIt);
+		}
+		else
+		{
+			g_undoTxdRelationships.insert({ entryHash, { relationship.first, -1 } });
+		}
+	}
+}
+
+static void AddVehicleArchetype(fwArchetype* self, uint32_t typesHash)
+{
+	if (overrideTypesHash)
+	{
+		typesHash = 0xF000;
+	}
+
+	g_origAddArchetype(self, typesHash);
+}
+
+static void (*g_origUnloadVehicleMeta)(DataFileEntry* entry);
+
+static void UnloadVehicleMetaForDlc(DataFileEntry* entry)
+{
+	auto hash = HashString(entry->name);
+	g_origUnloadVehicleMeta(entry);
+
+	// unload TXD relationships
+	for (auto& relationship : fx::GetIteratorView(g_undoTxdRelationships.equal_range(hash)))
+	{
+		static auto module = streaming::Manager::GetInstance()->moduleMgr.GetStreamingModule("ytd");
+
+		atPoolBase* entryPool = (atPoolBase*)((char*)module + 56);
+		if (auto entry = entryPool->GetAt<char>(relationship.second.first); entry)
+		{
+			if (xbr::IsGameBuildOrGreater<1868>())
+			{
+				*(int32_t*)(entry + 16) = relationship.second.second;
+			}
+			else
+			{
+				*(uint16_t*)(entry + 16) = relationship.second.second;
+			}
+		}
+	}
+
+	g_undoTxdRelationships.erase(hash);
+
+	// unload vehicle models
+	rage__fwArchetypeManager__FreeArchetypes(hash);
+}
+
+static void (*g_origFreeArchetypes)(uint32_t idx);
+
+static void FreeArchetypesHook(uint32_t idx)
+{
+	if (idx == 0xF000)
+	{
+		for (uint32_t hash : g_hashes)
+		{
+			g_origFreeArchetypes(hash);
+		}
+
+		g_hashes.clear();
+	}
+
+	g_origFreeArchetypes(idx);
+}
+#endif
+
+static HookFunction hookFunction([]()
+{
+#ifdef GTA_FIVE
+	{
+		auto location = hook::pattern("BA A1 85 94 52 41 B8 01").count(1).get(0).get<char>(0x34);
+		g_interiorProxyPool = (decltype(g_interiorProxyPool))(location + *(int32_t*)location + 4);
+	}
+
+	g_interiorProxyArray = hook::get_address<decltype(g_interiorProxyArray)>(hook::get_pattern("83 FA FF 75 4D 48 8D 0D ? ? ? ? BA", 8));
+
+	// vehicle metadata removal could be per DLC
+	// therefore, replace 0xF000 with an actual hash of the filename
+	{
+		auto location = hook::get_pattern("41 B8 00 F0 00 00 33 D2 E8", 8);
+		hook::set_call(&g_origLoadVehicleMeta, location);
+		hook::call(location, LoadVehicleMetaForDlc);
+
+		location = hook::get_pattern("8B D5 48 8B CE 89 46 18 40 84 FF 74 0A", 0x17);
+		hook::set_call(&g_origAddArchetype, location);
+		hook::call(location, AddVehicleArchetype);
+	}
+
+	// unloading wrapper
+	{
+		MH_Initialize();
+
+		auto location = hook::get_pattern("49 89 43 18 49 8D 43 10 33 F6", -0x21);
+		MH_CreateHook(location, UnloadVehicleMetaForDlc, (void**)&g_origUnloadVehicleMeta);
+		MH_EnableHook(location);
+
+		location = hook::get_pattern("8B F9 8B DE 66 41 3B F0 73 33", -0x19);
+		MH_CreateHook(location, FreeArchetypesHook, (void**)&g_origFreeArchetypes);
+		MH_EnableHook(location);
+	}
+#endif
+
 	// process streamer-loaded resource: check 'free instantly' flag even if no dependencies exist (change jump target)
-	*hook::get_pattern<int8_t>("4C 63 C0 85 C0 7E 54 48 8B", 6) = 0x25;
+#ifdef GTA_FIVE
+	* hook::get_pattern<int8_t>("4C 63 C0 85 C0 7E 54 48 8B", 6) = 0x25;
+#elif IS_RDR3
+	* hook::get_pattern<int8_t>("4C 63 C8 85 C0 7E 62 4C 8B", 21) = 0x2E;
+#endif
 
 	// same function: stub to change free-instantly flag if needed by bypass streaming
+#ifdef GTA_FIVE
 	static struct : jitasm::Frontend
 	{
 		static bool ShouldRequestBeAllowed()
@@ -1353,13 +2276,22 @@ static HookFunction hookFunction([] ()
 		hook::nop(location, 9);
 		hook::call_rcx(location, streamingBypassStub.GetCode());
 	}
+#endif
 
+#ifdef GTA_FIVE
 	g_streamingInternals = hook::get_address<void*>(hook::get_pattern("80 A1 7A 01 00 00 FE 8B EA", 20));
-
-	manifestChunkPtr = hook::get_address<void*>(hook::get_pattern("83 F9 08 75 43 48 8D 0D", 8));
+	manifestChunkPtr = hook::get_address<void*>(hook::get_pattern("C7 80 74 01 00 00 02 00 00 00 E8 ? ? ? ? 8B 06", -4));
+#elif IS_RDR3
+	g_streamingInternals = hook::get_address<void*>(hook::get_pattern("B1 01 E8 ? ? ? ? B9 FF FF 00 00 E8", -28));
+	manifestChunkPtr = hook::get_address<void*>(hook::get_pattern<char>("F6 44 24 70 04 74 ? 80 3D ? ? ? ? 00 74", 31));
+#endif
 
 	// level load
+#ifdef GTA_FIVE
 	void* hookPoint = hook::pattern("E8 ? ? ? ? 48 8B 0D ? ? ? ? 41 B0 01 48 8B D3").count(1).get(0).get<void>(18);
+#elif IS_RDR3
+	void* hookPoint = hook::pattern("E8 ? ? ? ? 48 8B 0D ? ? ? ? 4C 8D 0D ? ? ? ? 41 B0 01 48 8B D3 E8").count(1).get(0).get<void>(25);
+#endif
 	hook::set_call(&dataFileMgr__loadDat, hookPoint);
 	hook::call(hookPoint, LoadDats);
 
@@ -1369,7 +2301,11 @@ static HookFunction hookFunction([] ()
 	hook::call(hookPoint, LoadDefDats); //Call the new function to load the handling files
 
 	// don't normalize paths in pgRawStreamer
+#ifdef GTA_FIVE
 	hook::call(hook::get_pattern("48 8B D6 E8 ? ? ? ? B2 01 48", 3), NormalizePath);
+#elif IS_RDR3
+	hook::call(hook::get_pattern("75 ? B2 01 48 8B CB E8 ? ? ? ? 48 8B F8 48 85 C0", -43), NormalizePath);
+#endif
 
 	g_dataFileTypes = hook::get_pattern<EnumEntry>("61 44 DF 04 00 00 00 00");
 
@@ -1388,7 +2324,11 @@ static HookFunction hookFunction([] ()
 			{
 				trace("Loading default meta %s\n", dat);
 
+#ifdef GTA_FIVE
 				dataFileMgr__loadDat(g_dataFileMgr, dat.c_str(), true);
+#elif IS_RDR3
+				dataFileMgr__loadDat(g_dataFileMgr, dat.c_str(), true, nullptr);
+#endif
 			}
 
 			trace("Done loading default meta overrides!\n");
@@ -1397,6 +2337,7 @@ static HookFunction hookFunction([] ()
 
 	// unload GROUP_MAP before reloading, for it'll break fwMapTypesStore if there's a map CCS loaded
 	// by the time DLC reinitializes
+#ifdef GTA_FIVE
 	OnKillNetworkDone.Connect([]()
 	{
 		if (Instance<ICoreGameInit>::Get()->GetGameLoaded())
@@ -1404,7 +2345,10 @@ static HookFunction hookFunction([] ()
 			// unload GROUP_MAP and load GROUP_MAP_SP
 			_unloadMultiplayerContent();
 		}
+
+		g_pedsToRegister.clear();
 	}, 99925);
+#endif
 
 	OnKillNetworkDone.Connect([]()
 	{
@@ -1412,6 +2356,11 @@ static HookFunction hookFunction([] ()
 		SafelyDrainStreamer();
 
 		g_unloadingCfx = false;
+
+#ifdef GTA_FIVE
+		// unload pre-unloaded data files
+		UnloadDataFilesOfTypes({ 0xB3 /* DLC_POP_GROUPS */, 166 /* DLC_WEAPON_PICKUPS */ });
+#endif
 	}, 99900);
 
 	Instance<ICoreGameInit>::Get()->OnShutdownSession.Connect([]()
@@ -1437,27 +2386,61 @@ static HookFunction hookFunction([] ()
 		}
 
 		auto typesStore = streaming::Manager::GetInstance()->moduleMgr.GetStreamingModule("ytyp");
+		auto navMeshStore = streaming::Manager::GetInstance()->moduleMgr.GetStreamingModule("ynv");
+		auto staticBoundsStore = streaming::Manager::GetInstance()->moduleMgr.GetStreamingModule("ybn");
+		auto str = streaming::Manager::GetInstance();
 
-		for (auto [ module, idx ] : g_pendingRemovals)
+		for (auto [module, idx] : g_pendingRemovals)
 		{
 			if (module == typesStore)
 			{
+#ifdef GTA_FIVE
 				atPoolBase* entryPool = (atPoolBase*)((char*)module + 56);
 				auto entry = entryPool->GetAt<char>(idx);
 
 				*(uint16_t*)(entry + 16) &= ~0x14;
+#elif IS_RDR3
+				atPoolBase* entryPool = (atPoolBase*)((char*)module + 64);
+				auto entry = entryPool->GetAt<char>(idx);
+
+				*(uint16_t*)(entry + 24) &= ~0x14;
+#endif
 			}
 
-			streaming::Manager::GetInstance()->ReleaseObject(idx + module->baseIdx);
+			// if this is loaded by means of dependents, in Five we should remove the flags indicating this, or RemoveObject will fail and RemoveSlot will lead to inconsistent state
+			// in RDR3 this will have a special-case check in RemoveObject for dependents, but in case it fails we shall remove this still (otherwise RemoveSlot will corrupt)
+			//
+			// we don't do this for fwStaticBoundsStore since we don't call RemoveSlot for other reasons (will lead to odd state for interiors)
+			if (module != staticBoundsStore && str->Entries[idx + module->baseIdx].flags & 0xFFFC)
+			{
+				str->Entries[idx + module->baseIdx].flags &= ~0xFFFC;
+			}
 
+			// ClearRequiredFlag
+			str->ReleaseObject(idx + module->baseIdx, 0xF1);
+
+			// RemoveObject
+			str->ReleaseObject(idx + module->baseIdx);
+
+#ifdef GTA_FIVE
 			if (module == typesStore)
 			{
 				// if unloaded at *runtime* but flags were set, archetypes likely weren't freed - we should
 				// free them now.
 				rage__fwArchetypeManager__FreeArchetypes(idx);
 			}
+#endif
+		}
 
-			module->DeleteEntry(idx);
+		// call RemoveSlot after we have removed all objects, or dependency tracking may crash
+		for (auto [module, idx] : g_pendingRemovals)
+		{
+			// navmeshstore won't remove from some internal 'name hash' and therefore re-registration crashes
+			// staticboundsstore has a weird issue too at times (regarding interior proxies?)
+			if (module != navMeshStore && module != staticBoundsStore)
+			{
+				module->RemoveSlot(idx);
+			}
 		}
 
 		g_pendingRemovals.clear();
@@ -1467,21 +2450,31 @@ static HookFunction hookFunction([] ()
 
 	OnMainGameFrame.Connect([=]()
 	{
-		if (g_reloadStreamingFiles && g_lockedStreamingFiles == 0 && !g_lockReload)
+		if (
+			g_reloadStreamingFiles && g_lockedStreamingFiles == 0 && !g_lockReload
+#ifdef IS_RDR3
+			&& Instance<ICoreGameInit>::Get()->GetGameLoaded()
+#endif
+		)
 		{
-			LoadStreamingFiles();
+			LoadStreamingFiles(LoadType::AfterSession);
 
 			g_reloadStreamingFiles = false;
 		}
 	});
 
 	{
+#ifdef GTA_FIVE
 		char* location = hook::get_pattern<char>("48 63 82 90 00 00 00 49 8B 8C C0 ? ? ? ? 48", 11);
+#elif IS_RDR3
+		char* location = hook::get_pattern<char>("8B 82 90 00 00 00 49 8B 8C C0 ? ? ? ? 48", 10);
+#endif
 
 		g_dataFileMounters = (decltype(g_dataFileMounters))(hook::get_adjusted(0x140000000) + *(int32_t*)location); // why is this an RVA?!
 	}
 
 	{
+#ifdef GTA_FIVE
 		char* location = hook::get_pattern<char>("79 91 C8 BC E8 ? ? ? ? 48 8D", -0x30);
 
 		location += 0x1A;
@@ -1490,7 +2483,15 @@ static HookFunction hookFunction([] ()
 
 		hook::set_call(&g_disableContentGroup, location + 0x23);
 		hook::set_call(&g_enableContentGroup, location + 0x34);
-		hook::set_call(&g_clearContentCache, location + 0x50);
+		hook::set_call(&g_clearContentCache, location + ((xbr::IsGameBuildOrGreater<2189>()) ? 0x5C : 0x50));
+
+#elif IS_RDR3
+		char* location = hook::get_pattern<char>("E8 ? ? ? ? 8B 05 ? ? ? ? 48 8B 0D ? ? ? ? 48 8D 95");
+		g_extraContentManager = hook::get_address<void**>(location + 14);
+
+		hook::set_call(&g_disableContentGroup, location);
+		hook::set_call(&g_enableContentGroup, location + 31);
+#endif
 	}
 
 	rage::OnInitFunctionStart.Connect([](rage::InitFunctionType type)
@@ -1499,18 +2500,67 @@ static HookFunction hookFunction([] ()
 		{
 			g_lockReload = false;
 
-			LoadStreamingFiles(true);
+			LoadStreamingFiles(LoadType::BeforeSession);
 		}
 	});
 
 	rage::OnInitFunctionEnd.Connect([](rage::InitFunctionType type)
 	{
-		if (type == rage::INIT_SESSION)
+		if (type == rage::INIT_BEFORE_MAP_LOADED)
 		{
-			LoadStreamingFiles();
+			LoadStreamingFiles(LoadType::BeforeMapLoad);
+		}
+		else if (type == rage::INIT_SESSION)
+		{
+			LoadStreamingFiles(LoadType::AfterSession);
 			LoadDataFiles();
 		}
 	});
+
+	// support CfxRequest for pgRawStreamer
+#ifdef GTA_FIVE
+	hook::jump(hook::get_pattern("4D 63 C1 41 8B C2 41 81 E2 FF 03 00 00", -0xD), pgRawStreamer__GetEntryNameToBuffer);
+#elif IS_RDR3
+	hook::jump(hook::get_pattern("4D 63 C1 81 E2 FF 03 00 00 48 C1 E8 0A 48 8B 84 C1 B0 05 00 00", -8), pgRawStreamer__GetEntryNameToBuffer);
+#endif
+
+
+	{
+		// mapdatastore/maptypesstore 'should async place'
+		
+		// typesstore
+		{
+#ifdef GTA_FIVE
+			auto vtbl = hook::get_address<void**>(hook::get_pattern("45 8D 41 1C 48 8B D9 C7 40 D8 00 01 00 00", 22));
+			hook::put(&vtbl[29], ret0);
+#elif IS_RDR3
+			auto vtbl = hook::get_address<void**>(hook::get_pattern("C7 40 D8 00 01 00 00 45 8D 41 49 E8", 19));
+			hook::put(&vtbl[34], ret0);
+#endif
+		}
+
+		// datastore
+		{
+#ifdef GTA_FIVE
+			auto vtbl = hook::get_address<void**>(hook::get_pattern("44 8D 46 0E C7 40 D8 C7 01 00 00 E8", 19));
+			hook::put(&vtbl[29], ret0);
+#elif IS_RDR3
+			auto vtbl = hook::get_address<void**>(hook::get_pattern("C7 40 D8 C7 01 00 00 44 8D 47 49 E8", 19));
+			hook::put(&vtbl[34], ret0);
+#endif
+		}
+
+		// raw #map/#typ loading
+		hook::nop(hook::get_pattern("D1 E8 A8 01 74 ? 48 8B 84", 4), 2);
+	}
+
+#ifdef GTA_FIVE
+	// replay dlc loading
+	{
+		auto location = hook::get_pattern("0F 84 ? ? ? ? 48 8B 0D ? ? ? ? C6 05 ? ? ? ? 01 E8", 20);
+		hook::set_call(&g_origLoadReplayDlc, location);
+		hook::call(location, LoadReplayDlc);
+	}
 
 	// special point for CWeaponMgr streaming unload
 	// (game calls CExtraContentManager::ExecuteTitleUpdateDataPatchGroup with a specific group intended for weapon info here)
@@ -1543,8 +2593,19 @@ static HookFunction hookFunction([] ()
 		MH_EnableHook(MH_ALL_HOOKS);
 	}
 
-	// support CfxRequest for pgRawStreamer
-	hook::jump(hook::get_pattern("4D 63 C1 41 8B C2 41 81 E2 FF 03 00 00", -0xD), pgRawStreamer__GetEntryNameToBuffer);
+	// fwMapDataStore::FinishLoading map flag fixing
+	{
+		MH_Initialize();
+		MH_CreateHook(hook::get_pattern("25 00 0C 00 00 3D 00 08 00 00 49 8B 06", -0x6F), fwMapDataStore__FinishLoadingHook, (void**)&g_origfwMapDataStore__FinishLoading);
+		MH_EnableHook(MH_ALL_HOOKS);
+	}
+
+	// fwMapTypes::ConstructArchetypes hook (for #typ override issues with different sizes)
+	{
+		MH_Initialize();
+		MH_CreateHook(hook::get_pattern("FF 50 28 0F B7 46 20 33 ED", -0x21), fwMapTypes__ConstructArchetypesStub, (void**)&g_origfwMapTypes__ConstructArchetypes);
+		MH_EnableHook(MH_ALL_HOOKS);
+	}
 
 	// do not ever register our streaming files as part of DLC packfile dependencies
 	{
@@ -1557,5 +2618,8 @@ static HookFunction hookFunction([] ()
 	MH_Initialize();
 	MH_CreateHook(hook::get_pattern("8B D5 81 E2", -0x24), pgRawStreamer__OpenCollectionEntry, (void**)&g_origOpenCollectionEntry);
 	MH_CreateHook(hook::get_pattern("0F B7 C3 48 8B 5C 24 30 8B D0 25 FF", -0x14), pgRawStreamer__GetEntry, (void**)&g_origGetEntry);
+	MH_CreateHook(hook::get_pattern("45 8B E8 4C 8B F1 83 FA FF 0F 84", -0x18), fwStaticBoundsStore__ModifyHierarchyStatus, (void**)&g_orig_fwStaticBoundsStore__ModifyHierarchyStatus);
+	MH_CreateHook(hook::get_pattern("45 33 D2 84 C0 0F 84 ? 01 00 00 4C", -0x28), fwMapDataStore__ModifyHierarchyStatusRecursive, (void**)&g_orig_fwMapDataStore__ModifyHierarchyStatusRecursive);
 	MH_EnableHook(MH_ALL_HOOKS);
+#endif
 });

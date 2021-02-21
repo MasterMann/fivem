@@ -25,7 +25,9 @@ namespace CitizenFX.Core
 		public static IScriptHost ScriptHost { get; internal set; }
 
 		// actually, domain-global
-		private static InternalManager GlobalManager { get; set; }
+		internal static InternalManager GlobalManager { get; set; }
+
+		internal string ResourceName => m_resourceName;
 
 		[SecuritySafeCritical]
 		public InternalManager()
@@ -125,7 +127,21 @@ namespace CitizenFX.Core
 
 			ms_loadedAssemblies[assemblyFile] = assembly;
 
-			var definedTypes = assembly.GetTypes().Where(t => !t.IsAbstract && t.IsSubclassOf(typeof(BaseScript)) && t.GetConstructor(Type.EmptyTypes) != null);
+			Func<Type, bool> typesPredicate = t =>
+				t != null && !t.IsAbstract && t.IsSubclassOf(typeof(BaseScript)) && t.GetConstructor(Type.EmptyTypes) != null;
+
+			// We have ClientScript and ServerScript defined only in the respective environments.
+			// Handle type load exceptions and keep going.
+			// See https://stackoverflow.com/a/11915414
+			IEnumerable<Type> definedTypes;
+			try
+			{
+				definedTypes = assembly.GetTypes().Where(typesPredicate);
+			}
+			catch (ReflectionTypeLoadException e)
+			{
+				definedTypes = e.Types.Where(typesPredicate);
+			}
 
 			foreach (var type in definedTypes)
 			{
@@ -289,11 +305,13 @@ namespace CitizenFX.Core
 
 				using (var scope = new ProfilerScope(() => "c# deferredDelay"))
 				{
-					var delays = ms_delays.ToArray();
 					var now = DateTime.UtcNow;
+					var count = ms_delays.Count;
 
-					foreach (var delay in delays)
+					for (int delayIdx = 0; delayIdx < count; delayIdx++)
 					{
+						var delay = ms_delays[delayIdx];
+
 						if (now >= delay.Item1)
 						{
 							using (var inScope = new ProfilerScope(() => delay.Item3))
@@ -309,7 +327,9 @@ namespace CitizenFX.Core
 								}
 							}
 
-							ms_delays.Remove(delay);
+							ms_delays.RemoveAt(delayIdx);
+							delayIdx--;
+							count--;
 						}
 					}
 				}
@@ -369,7 +389,7 @@ namespace CitizenFX.Core
 						BaseScript.CurrentName = null;
 
 						return t;
-					}).Unwrap().ContinueWith(a =>
+					}, CancellationToken.None, TaskCreationOptions.None, CitizenTaskScheduler.Instance).Unwrap().ContinueWith(a =>
 					{
 						if (a.IsFaulted)
 						{
@@ -543,6 +563,7 @@ namespace CitizenFX.Core
 			private FastMethod<Action<IntPtr, IntPtr>> scriptTraceMethod;
 			private FastMethod<Action<IntPtr, IntPtr, int>> submitBoundaryStartMethod;
 			private FastMethod<Action<IntPtr, IntPtr, int>> submitBoundaryEndMethod;
+			private FastMethod<Func<IntPtr, IntPtr, int>> getLastErrorTextMethod;
 
 			[SecuritySafeCritical]
 			public DirectScriptHost(IntPtr hostPtr)
@@ -556,6 +577,7 @@ namespace CitizenFX.Core
 				scriptTraceMethod = new FastMethod<Action<IntPtr, IntPtr>>(nameof(scriptTraceMethod), hostPtr, 4);
 				submitBoundaryStartMethod = new FastMethod<Action<IntPtr, IntPtr, int>>(nameof(submitBoundaryStartMethod), hostPtr, 5);
 				submitBoundaryEndMethod = new FastMethod<Action<IntPtr, IntPtr, int>>(nameof(submitBoundaryEndMethod), hostPtr, 6);
+				getLastErrorTextMethod = new FastMethod<Func<IntPtr, IntPtr, int>>(nameof(getLastErrorTextMethod), hostPtr, 7);
 			}
 
 			[SecuritySafeCritical]
@@ -686,6 +708,31 @@ namespace CitizenFX.Core
 				{
 					method.method(hostPtr, new IntPtr(p), boundarySize);
 				}
+			}
+
+			[SecuritySafeCritical]
+			public IntPtr GetLastErrorText()
+			{
+				return GetLastErrorTextInternal();
+			}
+
+			[SecurityCritical]
+			private unsafe IntPtr GetLastErrorTextInternal()
+			{
+				IntPtr retVal = IntPtr.Zero;
+
+				try
+				{
+					IntPtr* retValRef = &retVal;
+
+					Marshal.ThrowExceptionForHR(getLastErrorTextMethod.method(hostPtr, new IntPtr(retValRef)));
+				}
+				finally
+				{
+
+				}
+
+				return retVal;
 			}
 		}
 

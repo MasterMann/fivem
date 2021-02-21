@@ -12,7 +12,11 @@
 
 #include <fxScripting.h>
 
+#include <CoreConsole.h>
+
 #include <Error.h>
+
+#include <EASTL/fixed_map.h>
 
 #include <mono/jit/jit.h>
 #include <mono/utils/mono-logger.h>
@@ -99,7 +103,6 @@ static int CoreClrCallback(const char* imageName)
 
 		if (_wcsicmp(platformPath.c_str(), fullPath) != 0)
 		{
-			trace("%s %s is not a platform image.\n", ToNarrow(fullPath), ToNarrow(filePart));
 			return FALSE;
 		}
 	}
@@ -111,8 +114,6 @@ static int CoreClrCallback(const char* imageName)
 			return TRUE;
 		}
 	}
-
-	trace("%s %s is not a platform image (even though the dir matches).\n", ToNarrow(fullPath), ToNarrow(filePart));
 
 	return FALSE;
 }
@@ -149,13 +150,17 @@ static void OutputExceptionDetails(MonoObject* exc, bool fatal = true)
 	}
 }
 
-static void GI_PrintLogCall(MonoString* str)
+static void GI_PrintLogCall(MonoString* channel, MonoString* str)
 {
-	trace("%s", mono_string_to_utf8(str));
+	console::Printf(mono_string_to_utf8(channel), "%s", mono_string_to_utf8(str));
 }
 
 static void
-gc_resize(MonoProfiler *profiler, int64_t new_size)
+#ifdef IS_FXSERVER
+gc_resize(MonoProfiler *profiler, uintptr_t new_size)
+#else
+gc_resize(MonoProfiler* profiler, int64_t new_size)
+#endif
 {
 }
 
@@ -171,31 +176,7 @@ struct _MonoProfiler
 
 MonoProfiler _monoProfiler;
 
-#ifdef _WIN32
-// custom heap so we won't end up depending on any suspended threads
-// (we need to be safe even if the GC suspended the world)
-static HANDLE g_heap = HeapCreate(0, 0, 0);
-
-template<typename T>
-struct StaticHeapAllocator
-{
-	using value_type = T;
-
-	T* allocate(size_t n)
-	{
-		return (T*)HeapAlloc(g_heap, 0, n * sizeof(T));
-	}
-
-	void deallocate(T* p, size_t n)
-	{
-		HeapFree(g_heap, 0, p);
-	}
-};
-
-static std::map<MonoDomain*, uint64_t, std::less<>, StaticHeapAllocator<std::pair<MonoDomain* const, uint64_t>>> g_memoryUsages;
-#else
-static std::map<MonoDomain*, uint64_t> g_memoryUsages;
-#endif
+static eastl::fixed_map<MonoDomain*, uint64_t, 4096, false> g_memoryUsages;
 
 static std::shared_mutex g_memoryUsagesMutex;
 
@@ -204,12 +185,12 @@ static bool g_requestedMemoryUsage;
 #ifndef IS_FXSERVER
 static void gc_event(MonoProfiler *profiler, MonoGCEvent event, int generation)
 #else
-static void gc_event(MonoProfiler *profiler, MonoProfilerGCEvent event, int generation)
+static void gc_event(MonoProfiler* profiler, MonoProfilerGCEvent event, uint32_t generation, mono_bool is_serial)
 #endif
 {
+#if defined(_WIN32)
 	switch (event) {
-	case MONO_GC_EVENT_PRE_START_WORLD:
-#ifndef IS_FXSERVER
+	case MONO_GC_EVENT_PRE_STOP_WORLD:
 		if (g_requestedMemoryUsage)
 		{
 			std::unique_lock<std::shared_mutex> lock(g_memoryUsagesMutex);
@@ -225,9 +206,9 @@ static void gc_event(MonoProfiler *profiler, MonoProfilerGCEvent event, int gene
 
 			g_requestedMemoryUsage = false;
 		}
-#endif
 		break;
 	}
+#endif
 }
 
 static uint64_t GI_GetMemoryUsage()
@@ -433,6 +414,9 @@ static void InitMono()
 	std::string citizenClrLibPath = MakeRelativeNarrowPath("citizen/clr2/lib/mono/4.5/");
 
 	putenv(const_cast<char*>(va("MONO_PATH=%s", citizenClrLibPath)));
+
+	mono_set_crash_chaining(true);
+	mono_set_signal_chaining(true);
 #endif
 
 	mono_assembly_setrootdir(citizenClrPath.c_str());
@@ -454,6 +438,13 @@ static void InitMono()
 	mono_profiler_install(&_monoProfiler, profiler_shutdown);
 	mono_profiler_install_gc(gc_event, gc_resize);
 	mono_profiler_set_events(MONO_PROFILE_GC);
+#endif
+
+#if defined(_WIN32) && defined(IS_FXSERVER)
+	auto monoProfilerHandle = mono_profiler_create(&_monoProfiler);
+
+	mono_profiler_set_gc_event_callback(monoProfilerHandle, gc_event);
+	mono_profiler_set_gc_resize_callback(monoProfilerHandle, gc_resize);
 #endif
 
 	char* args[2];
@@ -561,11 +552,21 @@ struct MonoAttachment
 
 DLL_EXPORT void MonoEnsureThreadAttached()
 {
+	if (!g_rootDomain)
+	{
+		return;
+	}
+
 	static thread_local MonoAttachment attachment;
 }
 
 result_t MonoCreateObjectInstance(const guid_t& guid, const guid_t& iid, void** objectRef)
 {
+	if (!g_rootDomain)
+	{
+		return FX_E_NOINTERFACE;
+	}
+
 	MonoEnsureThreadAttached();
 
 	MonoObject* exc = nullptr;
@@ -596,6 +597,11 @@ result_t MonoCreateObjectInstance(const guid_t& guid, const guid_t& iid, void** 
 
 std::vector<guid_t> MonoGetImplementedClasses(const guid_t& iid)
 {
+	if (!g_rootDomain)
+	{
+		return {};
+	}
+
 	MonoEnsureThreadAttached();
 
 	void* args[1];

@@ -33,6 +33,8 @@ namespace CitizenFX.Core
 
 		public IdentifierCollection Identifiers => new IdentifierCollection(this);
 
+		public StateBag State => new StateBag("player:" + m_handle);
+
 		public string EndPoint => GetPlayerEndpoint(m_handle);
 
 		public Ped Character => Ped.FromPlayerHandle(m_handle);
@@ -128,7 +130,7 @@ namespace CitizenFX.Core
 		/// </example>
 		/// <param name="type">The identifier type to return.</param>
 		/// <returns>The identifier value (without prefix), or null if it could not be found.</returns>
-		public string this[string type] => this.FirstOrDefault(id => id.Split(':')[0].Equals(type, StringComparison.InvariantCultureIgnoreCase))?.Split(':')?.Last();
+		public string this[string type] => this.FirstOrDefault(id => id.Split(':')[0].Equals(type, StringComparison.InvariantCultureIgnoreCase))?.Split(new char[] { ':' }, 2)?.Last();
 	}
 
 	public class PlayerList : IEnumerable<Player>

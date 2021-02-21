@@ -53,6 +53,7 @@ enum ConsoleVariableFlags
 	ConVar_Modified   = 0x2,
 	ConVar_ServerInfo = 0x4,
 	ConVar_Replicated = 0x8,
+	ConVar_ReadOnly   = 0x10,
 };
 
 class ConsoleVariableManager
@@ -88,6 +89,16 @@ public:
 	virtual void RemoveVariablesWithFlag(int flags);
 
 	virtual void SaveConfiguration(const TWriteLineCB& writeLineFunction);
+
+	inline bool ShouldSuppressReadOnlyWarning()
+	{
+		return m_suppressReadOnlyWarning;
+	}
+
+	inline void ShouldSuppressReadOnlyWarning(bool should)
+	{
+		m_suppressReadOnlyWarning = should;
+	}
 
 	inline console::Context* GetParentContext()
 	{
@@ -126,7 +137,12 @@ private:
 	std::unique_ptr<ConsoleCommand> m_setrCommand;
 
 	std::unique_ptr<ConsoleCommand> m_toggleCommand;
+	std::unique_ptr<ConsoleCommand> m_toggleCommand2;
 	std::unique_ptr<ConsoleCommand> m_vstrCommand;
+	std::unique_ptr<ConsoleCommand> m_vstrHoldCommand;
+	std::unique_ptr<ConsoleCommand> m_vstrReleaseCommand;
+
+	bool m_suppressReadOnlyWarning = false;
 
 public:
 	inline static ConsoleVariableManager* GetDefaultInstance()
@@ -159,6 +175,16 @@ public:
 
 		m_setCommand = std::make_unique<ConsoleCommand>(manager->GetParentContext(), name, [=] (const T& newValue)
 		{
+			if (m_manager->GetEntryFlags(m_name) & ConVar_ReadOnly)
+			{
+				if (!m_manager->ShouldSuppressReadOnlyWarning() || !(typename ConsoleArgumentTraits<T>::Equal()(GetRawValue(), m_curValue)))
+				{
+					console::PrintWarning("cmd", "'%s' is read only. Try using `+set` in the command line, or prefixing the command with `set` in the server startup script.\n", m_name);
+				}
+
+				return;
+			}
+
 			SetRawValue(newValue);
 		});
 	}
@@ -197,6 +223,16 @@ public:
 
 	virtual bool SetValue(const std::string& value) override
 	{
+		if (m_manager->GetEntryFlags(m_name) & ConVar_ReadOnly)
+		{
+			if (!m_manager->ShouldSuppressReadOnlyWarning())
+			{
+				console::PrintWarning("cmd", "'%s' is read only. Try using `+set` in the command line.\n", m_name);
+			}
+
+			return false;
+		}
+
 		T newValue;
 
 		if (ParseArgument(value, &newValue))

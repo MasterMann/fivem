@@ -10,7 +10,10 @@
 
 #include <shared_mutex>
 
+#if defined(_CPPRTTI) || !defined(_MSC_VER)
+#define HAS_ANY
 #include <any>
+#endif
 
 namespace console
 {
@@ -57,6 +60,8 @@ public:
 	virtual void Invoke(const std::string& commandString, const std::string& executionContext = std::string());
 
 	virtual void ForAllCommands(const std::function<void(const std::string&)>& callback);
+
+	virtual bool HasCommand(const std::string& name);
 
 	virtual const std::string& GetRawCommand();
 
@@ -247,6 +252,7 @@ struct ConsoleArgumentType<TArgument, std::enable_if_t<std::is_floating_point<TA
 	}
 };
 
+#ifdef HAS_ANY
 class ExternalContext : public std::any
 {
 public:
@@ -256,6 +262,15 @@ public:
 		
 	}
 };
+#else
+class ExternalContext
+{
+public:
+	ExternalContext(const std::string& str)
+	{
+	}
+};
+#endif
 
 namespace internal
 {

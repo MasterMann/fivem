@@ -28,6 +28,10 @@
 							<PoolSize value="256"/>
 						</Item>
 						<Item>
+							<PoolName>CPickupData</PoolName>
+							<PoolSize value="300"/>
+						</Item>
+						<Item>
 							<PoolName>CNetObjPed</PoolName>
 							<PoolSize value="238"/> <!-- 110 + player count -->
 						</Item>
@@ -49,7 +53,7 @@
 						</Item>
 						<Item>
 							<PoolName>AttachmentExtension</PoolName>
-							<PoolSize value="430"/>
+							<PoolSize value="860"/>
 						</Item>
 						<Item>
 						  <PoolName>AudioHeap</PoolName>
@@ -65,7 +69,7 @@
 						</Item>
 						<Item>
 							<PoolName>StreamPed req data</PoolName>
-							<PoolSize value="180"/>
+							<PoolSize value="250"/>
 						</Item>
 						<Item>
 							<PoolName>StreamPed render data</PoolName>
@@ -73,11 +77,11 @@
 						</Item>
 						<Item>
 							<PoolName>PedProp req data</PoolName>
-							<PoolSize value="200"/>
+							<PoolSize value="250"/>
 						</Item>
 						<Item>
 							<PoolName>PedProp render data</PoolName>
-							<PoolSize value="480"/>
+							<PoolSize value="560"/>
 						</Item>
 						<Item>
 							<!-- Size of CVehicleRecordingMgr's streaming module. -->
@@ -130,27 +134,27 @@
 						</Item>
 						<Item>
 							<PoolName>AnimStore</PoolName>
-							<PoolSize value="14700"/>
+							<PoolSize value="21000"/>
 						</Item>
 						<Item>
 							<PoolName>CGameScriptResource</PoolName>
-							<PoolSize value="3051"/>
+							<PoolSize value="3062"/>
 						</Item>
 						<Item>
 							<PoolName>CGameScriptHandlerNetwork</PoolName>
-							<PoolSize value="250"/>
+							<PoolSize value="750"/>
 						</Item>
 						<Item>
 							<PoolName>CGameScriptHandlerNetComponent</PoolName>
-							<PoolSize value="350"/>
+							<PoolSize value="850"/>
 						</Item>
 						<Item>
 							<PoolName>CGameScriptHandler</PoolName>
-							<PoolSize value="250"/>
+							<PoolSize value="750"/>
 						</Item>
 						<Item>
 							<PoolName>ClothStore</PoolName>
-							<PoolSize value="60"/>
+							<PoolSize value="600"/>
 						</Item>
 						<Item>
 							<PoolName>CombatMeleeManager_Groups</PoolName>
@@ -158,7 +162,7 @@
 						</Item>
 						<Item>
 							<PoolName>CombatMeleeManager_GroupsMP</PoolName>
-							<PoolSize value="10"/>
+							<PoolSize value="20"/>
 						</Item>
 						<Item>
 							<PoolName>CombatMountedManager_Attacks</PoolName>
@@ -270,7 +274,7 @@
 						</Item>
 						<Item>
 							<PoolName>FragmentStore</PoolName>
-							<PoolSize value="24000"/>
+							<PoolSize value="48000"/>
 						</Item>
 						<Item>
 							<PoolName>GamePlayerBroadcastDataHandler_Remote</PoolName>
@@ -314,7 +318,7 @@
 						</Item>
 						<Item>
 							<PoolName>LightEntity</PoolName>
-							<PoolSize value="4200"/>
+							<PoolSize value="4700"/>
 						</Item>
 						<Item>
 							<PoolName>MapDataLoadedNode</PoolName>
@@ -322,15 +326,15 @@
 						</Item>
 						<Item>
 							<PoolName>MapDataStore</PoolName>
-							<PoolSize value="11000"/>
+							<PoolSize value="12000"/>
 						</Item>
 						<Item>
 							<PoolName>MapTypesStore</PoolName>
-							<PoolSize value="1800"/>
+							<PoolSize value="3000"/>
 						</Item>
 						<Item>
 							<PoolName>MetaDataStore</PoolName>
-							<PoolSize value="3000"/>
+							<PoolSize value="6000"/>
 						</Item>
 						<Item>
 							<PoolName>NavMeshes</PoolName>
@@ -354,15 +358,15 @@
 						</Item>
 						<Item>
 							<PoolName>OcclusionPathNode</PoolName>
-							<PoolSize value="5200"/>
+							<PoolSize value="5250"/>
 						</Item>
 						<Item>
 							<PoolName>OcclusionPortalEntity</PoolName>
-							<PoolSize value="250"/>
+							<PoolSize value="260"/>
 						</Item>
 						<Item>
 							<PoolName>OcclusionPortalInfo</PoolName>
-							<PoolSize value="500"/>
+							<PoolSize value="550"/>
 						</Item>
 						<Item>
 							<PoolName>Peds</PoolName>
@@ -370,6 +374,10 @@
 						</Item>
 						<Item>
 							<PoolName>CWeapon</PoolName>
+							<PoolSize value="1024"/>
+						</Item>
+						<Item>
+							<PoolName>CWeaponComponentInfo</PoolName>
 							<PoolSize value="1024"/>
 						</Item>
 						<Item>
@@ -390,7 +398,7 @@
 						</Item>
 						<Item>
 							<PoolName>CPickupPlacementCustomScriptData</PoolName>
-							<PoolSize value="70"/>
+							<PoolSize value="200"/>
 						</Item>
 						<Item>
 							<PoolName>CRegenerationInfo</PoolName>
@@ -418,11 +426,11 @@
 						</Item>
 						<Item>
 							<PoolName>QuadTreeNodes</PoolName>
-							<PoolSize value="1310"/>
+							<PoolSize value="1500"/>
 						</Item>
 						<Item>
 							<PoolName>ScaleformStore</PoolName>
-							<PoolSize value="742"/>
+							<PoolSize value="842"/>
 						</Item>
 						<Item>
 							<PoolName>ScaleformMgrArray</PoolName>
@@ -430,7 +438,7 @@
 						</Item>
 						<Item>
 							<PoolName>ScriptStore</PoolName>
-							<PoolSize value="900"/>
+							<PoolSize value="1000"/>
 						</Item>
 						<Item>
 							<PoolName>StaticBounds</PoolName>
@@ -438,7 +446,7 @@
 						</Item>
 						<Item>
 							<PoolName>tcBox</PoolName>
-							<PoolSize value="3000"/>
+							<PoolSize value="6000"/>
 						</Item>
 						<Item>
 							<PoolName>TrafficLightInfos</PoolName>
@@ -446,7 +454,15 @@
 						</Item>
 						<Item>
 							<PoolName>TxdStore</PoolName>
-							<PoolSize value="65500"/>
+							<PoolSize value="75500"/>
+						</Item>
+						<Item>
+							<PoolName>CNetObjVehicle</PoolName>
+							<PoolSize value="250"/>
+						</Item>
+						<Item>
+							<PoolName>CVehicleSyncData</PoolName>
+							<PoolSize value="255"/>
 						</Item>
 						<Item>
 							<PoolName>Vehicles</PoolName>
@@ -454,11 +470,11 @@
 						</Item>
 						<Item>
 							<PoolName>VehicleStreamRequest</PoolName>
-							<PoolSize value="60"/>
+							<PoolSize value="256"/>
 						</Item>
 						<Item>
 							<PoolName>VehicleStreamRender</PoolName>
-							<PoolSize value="100"/>
+							<PoolSize value="256"/>
 						</Item>
 						<Item>
 							<PoolName>VehicleStruct</PoolName>
@@ -466,7 +482,7 @@
 						</Item>
         					<Item>
 							<PoolName>HandlingData</PoolName>
-							<PoolSize value="6000"/>
+							<PoolSize value="16000"/>
 						</Item>
 						<Item>
 							<!-- Size of the CWaypointRecording streaming module. -->
@@ -604,11 +620,11 @@
 						</Item>
 						<Item>
 							<PoolName>ActionTable_Definitions</PoolName>
-							<PoolSize value="306"/>
+							<PoolSize value="310"/>
 						</Item>
 						<Item>
 							<PoolName>ActionTable_Results</PoolName>
-							<PoolSize value="474"/>
+							<PoolSize value="478"/>
 						</Item>
 						<Item>
 							<PoolName>ActionTable_Impulses</PoolName>
@@ -616,7 +632,7 @@
 						</Item>
 						<Item>
 							<PoolName>ActionTable_Interrelations</PoolName>
-							<PoolSize value="60"/>
+							<PoolSize value="61"/>
 						</Item>
 						<Item>
 							<PoolName>ActionTable_Homings</PoolName>
@@ -628,7 +644,7 @@
 						</Item>
 						<Item>
 							<PoolName>ActionTable_StrikeBones</PoolName>
-							<PoolSize value="18"/>
+							<PoolSize value="19"/>
 						</Item>
 						<Item>
 							<PoolName>ActionTable_Rumbles</PoolName>
@@ -862,10 +878,10 @@
 					<MaxMloModelInfos value="220"/>
 					<MaxPedModelInfos value="825"/>
 					<MaxTimeModelInfos value="1800"/>
-					<MaxVehicleModelInfos value="620"/>
+					<MaxVehicleModelInfos value="1024"/>
 					<MaxWeaponModelInfos value="115"/>
 					<MaxExtraPedModelInfos value="1024"/>
-					<MaxExtraVehicleModelInfos value="1024"/>
+					<MaxExtraVehicleModelInfos value="2048"/>
 					<MaxExtraWeaponModelInfos value="1024"/>
 				</ConfigModelInfo>
 
@@ -877,7 +893,7 @@
 				</ConfigExtensions>
 
 				<ConfigStreamingEngine>
-					<ArchiveCount value="2904"/>
+					<ArchiveCount value="3416"/>
 					<PhysicalStreamingBuffer value="252"/>
 					<VirtualStreamingBuffer value="1000"/>
 				</ConfigStreamingEngine>

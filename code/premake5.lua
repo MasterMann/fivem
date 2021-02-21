@@ -3,6 +3,8 @@ premake.downloadModule = function()
 	return false
 end
 
+_G._ROOTPATH = path.getabsolute('.')
+
 xpcall(function()
 newoption {
 	trigger 	= "with-asan",
@@ -33,9 +35,8 @@ root_cwd = os.getcwd()
 
 -- initialize components
 dofile('components/config.lua')
-dofile('vendor/config.lua')
-
 load_privates('privates_config.lua')
+dofile('vendor/config.lua')
 
 component
 {
@@ -47,7 +48,7 @@ component
 workspace "CitizenMP"
 	configurations { "Debug", "Release" }
 
-	symbols "On"
+	symbols "Full"
 	characterset "Unicode"
 
 	flags { "No64BitChecks" }
@@ -73,15 +74,17 @@ workspace "CitizenMP"
 	libdirs { "deplibs/lib/" }
 
 	location ((_OPTIONS['builddir'] or "build/") .. _OPTIONS['game'])
+	
+	cppdialect "C++17"
 
 	if os.istarget('windows') then
-		buildoptions '/std:c++17'
-		
 		if _OPTIONS['game'] ~= 'server' then
-			buildoptions '/await'
+			buildoptions { '/await', '/d2FH4-' }
 		end
 
 		systemversion '10.0.18362.0'
+	else
+		vectorextensions 'SSSE3'
 	end
 
 	-- special build dirs for FXServer
@@ -89,6 +92,9 @@ workspace "CitizenMP"
 		location ((_OPTIONS['builddir'] or "build/") .. "server/" .. os.target())
 		architecture 'x64'
 		defines 'IS_FXSERVER'
+		startproject 'DuplicityMain'
+	else
+		startproject 'CitiLaunch'
 	end
 
 	local binroot = ((_OPTIONS['bindir'] or "bin/") .. _OPTIONS['game']) .. '/'
@@ -108,6 +114,12 @@ workspace "CitizenMP"
 			buildoptions '-mpclmul -maes -mssse3 -mavx2 -mrtm'
 			buildoptions '-fsanitize=address -fsanitize-recover=address'
 	end
+	
+	filter { 'action:vs*' }
+		implibdir "$(IntDir)/lib/"
+		symbolspath "$(TargetDir)dbg/$(TargetName).pdb"
+		
+	filter {}
 
 	-- debug output
 	configuration "Debug*"
@@ -133,6 +145,18 @@ workspace "CitizenMP"
 
 		filter 'language:C or language:C++'
 			architecture 'x64'
+			
+	configuration "game=rdr3"
+		defines "IS_RDR3"
+
+		filter 'language:C or language:C++'
+			architecture 'x64'
+			
+	configuration "game=launcher"
+		defines "IS_LAUNCHER"
+
+		filter 'language:C or language:C++'
+			architecture 'x64'
 
 	configuration "windows"
 		links { "winmm" }
@@ -140,7 +164,7 @@ workspace "CitizenMP"
 	filter { 'system:not windows', 'language:C or language:C++' }
 		architecture 'x64'
 		
-		links { 'c++' }
+		links { 'stdc++' }
 
 		buildoptions {
 			"-fPIC", -- required to link on AMD64
@@ -155,11 +179,17 @@ workspace "CitizenMP"
 	else
 		include 'server/launcher'
 	end
+	
+	if os.istarget('windows') then
+		include 'premake5_layout.lua'
+	end
 
 	-- TARGET: corert
 	include 'client/citicore'
-
+	
 if _OPTIONS['game'] ~= 'server' then
+	include 'client/ipfsdl'
+
 	project "CitiGame"
 		targetname "CitizenGame"
 		language "C++"
@@ -192,6 +222,12 @@ premake.override(premake.vstudio.dotnetbase, 'debugProps', function(base, cfg)
 	_p(2,'<Optimize>%s</Optimize>', iif(premake.config.isOptimizedBuild(cfg), "true", "false"))
 end)
 
+premake.override(premake.vstudio.vc2010, 'ignoreImportLibrary', function(base, cfg)
+	if cfg.flags.NoImportLib then
+		premake.vstudio.vc2010.element("IgnoreImportLibrary", nil, "true")
+	end
+end)
+
 premake.override(premake.vstudio.vc2010, 'importLanguageTargets', function(base, prj)
 	base(prj)
 
@@ -209,6 +245,28 @@ premake.override(premake.vstudio.vc2010, 'importLanguageTargets', function(base,
 		_p(2, '<PropertyGroup>')
 		_p(3, '<PostBuildEventUseInBuild Condition="\'$(LinkSkippedExecution)\' == \'True\'">false</PostBuildEventUseInBuild>')
 		_p(2, '</PropertyGroup>')
+		_p(1, '</Target>')
+	end
+	
+	local hasPreLink = false
+
+	for cfg in premake.project.eachconfig(prj) do
+		if cfg.prelinkcommands and #cfg.prelinkcommands > 0 then
+			hasPreLink = true
+			break
+		end
+	end
+
+	if hasPreLink then
+		_p(1, '<PropertyGroup>')
+		_p(2, '<PreLinkEventUseInBuild>false</PreLinkEventUseInBuild>')
+		_p(1, '</PropertyGroup>')
+		-- DoLinkOutputFilesMatch is right before PreLinkEvent; so it won't evaluate the condition yet
+		_p(1, '<Target Name="EnablePreLinkEvent" Inputs="@(Link)" Outputs="$(ProjectDir)/$(ProjectName).res" BeforeTargets="DoLinkOutputFilesMatch">')
+		-- use CreateProperty task to set property based on skipped state
+		_p(2, '<CreateProperty Value="true">')
+		_p(3, '<Output TaskParameter="ValueSetByTask" PropertyName="PreLinkEventUseInBuild" />')
+		_p(2, '</CreateProperty>')
 		_p(1, '</Target>')
 	end
 end)
@@ -243,16 +301,25 @@ premake.override(premake.vstudio.cs2005, "targets", function(base, prj)
     
     if prj.name == 'CitiMono' then
 		_p(1, '<PropertyGroup>')
-		_p(2, '<GenAPITargetDir>%s/</GenAPITargetDir>', path.getabsolute("client/clrref/"))
-		_p(2, '<GenAPIAdditionalParameters>%s</GenAPIAdditionalParameters>', ('-excludeApiList:"%s" -excludeAttributesList:"%s"'):format(
+		_p(2, '<GenAPITargetDir>%s</GenAPITargetDir>', path.getabsolute("client/clrref/" .. _OPTIONS['game']))
+		_p(2, '<GenAPITargetPath>$(GenAPITargetDir)\\$(TargetName).cs</GenAPITargetPath>')
+		_p(2, '<GenAPIAdditionalParameters>%s</GenAPIAdditionalParameters>', ('--exclude-api-list "%s" --exclude-attributes-list "%s"'):format(
 			path.getabsolute("client/clrref/exclude_list.txt"),
 			path.getabsolute("client/clrref/exclude_attributes_list.txt")
 		))
-		_p(2, '<GenerateReferenceAssemblySources>true</GenerateReferenceAssemblySources>')
+		_p(2, '<GenerateReferenceAssemblySource>true</GenerateReferenceAssemblySource>')
 		_p(1, '</PropertyGroup>')
 		
-		_p(1, '<Import Project="%s" />', path.getabsolute("client/clrcore/GenAPI.targets"))
+		_p(1, '<Import Project="$(ProjectDir)\\packages\\Microsoft.DotNet.GenAPI.6.0.0-beta.21063.5\\build\\Microsoft.DotNet.GenAPI.targets" />')
+
+		_p(1, '<Target Name="CreateReferenceAssemblyDirectory" BeforeTargets="GenerateReferenceAssemblySource">')
+		_p(2, '<MakeDir Directories="$(GenAPITargetDir)" />')
+		_p(1, '</Target>')
     end
+
+	if prj.name == 'CitiMonoRef' then
+		_p(1, '<Import Project="%s" />', path.getabsolute("client/clrref/GenFacades.targets"))
+	end
 end)
 
 premake.override(premake.vstudio.nuget2010, "supportsPackageReferences", function(base, prj)
@@ -269,6 +336,7 @@ premake.override(premake.vstudio.dotnetbase, "nuGetReferences", function(base, p
 	return base(prj)
 end)
 
+if _OPTIONS['game'] ~= 'launcher' then
 	project "CitiMono"
 		targetname "CitizenFX.Core"
 		language "C#"
@@ -289,16 +357,20 @@ end)
 		
 		if _OPTIONS['game'] ~= 'server' then
 			defines { 'USE_HYPERDRIVE' }
-			files { "client/clrcore/External/*.cs" }
+			
+			if _OPTIONS['game'] == 'five' then
+				files { "client/clrcore/External/*.cs" }
+			end
 		else
 			files { "client/clrcore/Server/*.cs" }
 		end
-		
+
 		if os.istarget('windows') then
-			nuget { "Microsoft.DotNet.BuildTools.GenAPI:3.0.0-preview1-03805-01", "Microsoft.DotNet.BuildTools.GenFacades:3.0.0-preview1-03805-01" }
-			nugetsource "https://dotnet.myget.org/F/dotnet-buildtools/api/v3/index.json"
-			
-			
+			nuget {
+				"Microsoft.DotNet.GenAPI:6.0.0-beta.21063.5",
+				"Microsoft.DotNet.GenFacades:6.0.0-beta.21063.5",
+			}
+			nugetsource "https://pkgs.dev.azure.com/dnceng/public/_packaging/dotnet-eng/nuget/v3/index.json"
 		end
 
 		links {
@@ -363,30 +435,17 @@ end)
 			
 			links { "System.dll", "System.Drawing.dll" }
 			
-			files { "client/clrref/CitizenFX.Core.cs" }
+			files { "client/clrref/" .. _OPTIONS['game'] .. "/CitizenFX.Core.cs" }
 			
 			buildoptions '/debug:portable /langversion:7.3'
-			
-			postbuildcommands {
-				('copy /y "%s" "%s"'):format(
-					"$(TargetDir)..\\CitizenFX.Core.xml",
-					"$(TargetDir)$(TargetName).xml"
-				),				
-				('"%s" -facadePath:"%s" -seeds:"%s" -contracts:"%s"'):format(
-					"$(SolutionDir)\\packages\\Microsoft.DotNet.BuildTools.GenFacades.3.0.0-preview1-03805-01\\tools\\GenFacades.exe",
-					"$(TargetDir)..",
-					"$(TargetDir)..\\CitizenFX.Core.dll",
-					"$(TargetPath)"
-				)
-			}
-			
+
 			configuration "Debug*"
 				targetdir (binroot .. '/debug/citizen/clr2/lib/mono/4.5/ref/')
 
 			configuration "Release*"
 				targetdir (binroot .. '/release/citizen/clr2/lib/mono/4.5/ref/')
 	end
-
+end
 	group ""
 
 	-- TARGET: shared component

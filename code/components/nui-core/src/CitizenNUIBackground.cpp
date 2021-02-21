@@ -8,8 +8,12 @@
 #include "StdInc.h"
 #include "CefOverlay.h"
 
-#include <DrawCommands.h>
-#include <RGBA.h>
+extern nui::GameInterface* g_nuiGi;
+
+#include <CfxRGBA.h>
+
+#include <VFSManager.h>
+#include <VFSWin32.h>
 
 #include <DirectXColors.h>
 #include <wrl.h>
@@ -36,8 +40,7 @@ struct DWMP_GET_COLORIZATION_PARAMETERS_DATA
 class CitizenNUIBackground
 {
 private:
-	rage::grcTexture* m_backdropTexture;
-	rage::grcTexture* m_overlayTexture;
+	fwRefContainer<nui::GITexture> m_backdropTexture;
 
 	ComPtr<IWICImagingFactory> m_imagingFactory;
 
@@ -46,11 +49,11 @@ private:
 	DwmpGetColorizationParameters_t m_fDwmpGetColorizationParameters;
 
 private:
-	rage::grcTexture* InitializeTextureFromFile(std::wstring filename);
+	fwRefContainer<nui::GITexture> InitializeTextureFromFile(const std::string& filename);
 
 	void EnsureTextures();
 
-	void DrawBackground(rage::grcTexture* texture, CRGBA colorValue);
+	void DrawBackground(fwRefContainer<nui::GITexture> texture, CRGBA colorValue, bool cover = false);
 
 	CRGBA GetCurrentDWMColor(bool usePulse);
 
@@ -216,72 +219,93 @@ void CitizenNUIBackground::Initialize()
 
 		if (isMainUI)
 		{
-			CRGBA color = GetCurrentColor(true);
-
-			static uint32_t lastColorUpdate;
-
-			if ((GetTickCount() - lastColorUpdate) > 30000)
-			{
-				CRGBA baseColor = GetCurrentColor(false);
-
-				nui::PostFrameMessage("mpMenu", fmt::sprintf(R"({ "type": "setColor", "color": [ %d, %d, %d ] })", baseColor.red, baseColor.green, baseColor.blue));
-
-				lastColorUpdate = GetTickCount();
-			}
-
-			DrawBackground(m_backdropTexture, CRGBA(255, 255, 255, 255));
-
-			DrawBackground(m_overlayTexture, color);
+#ifndef GTA_FIVE
+			DrawBackground(m_backdropTexture, CRGBA(255, 255, 255, 255), true);
+#endif
 		}
 	});
 }
 
-void CitizenNUIBackground::DrawBackground(rage::grcTexture* texture, CRGBA colorValue)
+void CitizenNUIBackground::DrawBackground(fwRefContainer<nui::GITexture> texture, CRGBA colorValue, bool cover /* = false */)
 {
-#ifdef _HAVE_GRCORE_NEWSTATES
-	auto oldBlendState = GetBlendState();
-	SetBlendState(GetStockStateIdentifier(BlendStateDefault));
-#endif
-
-	SetTextureGtaIm(texture);
-
 	int resX, resY;
-	GetGameResolution(resX, resY);
+	g_nuiGi->GetGameResolution(&resX, &resY);
 
-	uint32_t color = colorValue.AsARGB();
+	nui::ResultingRectangle rr;
+	rr.rectangle = CRect(0.0f, 0.0f, resX, resY);
+	rr.color = colorValue;
 
-	DrawImSprite(0.0f, 0.0f, resX, resY, 0.0f, 0.0f, 0.0f, 1.0f, 1.0f, &color, 0);
+	if (cover)
+	{
+		float oWidth = 2538.0f;
+		float oHeight = 1355.0f;
 
-#ifdef _HAVE_GRCORE_NEWSTATES
-	SetBlendState(oldBlendState);
-#endif
+		float originalRatios[2] = {
+			resX / oWidth,
+			resY / oHeight
+		};
+
+		float coverRatio = std::max(originalRatios[0], originalRatios[1]);
+
+		float newImageWidth = oWidth * coverRatio;
+		float newImageHeight = oHeight * coverRatio;
+
+		float nx = (resX - newImageWidth) / 2;
+		float ny = (resY - newImageHeight) / 2;
+
+		rr.rectangle = CRect{
+			nx,
+			ny,
+			nx + newImageWidth,
+			ny + newImageHeight
+		};
+	}
+
+	g_nuiGi->SetTexture(texture);
+	g_nuiGi->DrawRectangles(1, &rr);
+	g_nuiGi->UnsetTexture();
 }
 
-rage::grcTexture* g_cursorTexture;
+fwRefContainer<nui::GITexture> g_cursorTexture;
 
 void CitizenNUIBackground::EnsureTextures()
 {
-	if (!m_backdropTexture)
+#ifndef GTA_FIVE
+	if (!m_backdropTexture.GetRef())
 	{
-		m_backdropTexture = InitializeTextureFromFile(MakeRelativeCitPath(L"citizen\\resources\\background_main.jpg"));
-	}
+		m_backdropTexture = InitializeTextureFromFile("citizen:/ui/app/bg-night.bb1065920b7124650a88.jpg");
 
-	if (!m_overlayTexture)
-	{
-		m_overlayTexture = InitializeTextureFromFile(MakeRelativeCitPath(L"citizen\\resources\\base_color.png"));
+		if (!m_backdropTexture.GetRef())
+		{
+			m_backdropTexture = InitializeTextureFromFile("citizen:/resources/background_main.jpg");
+		}
 	}
+#endif
 
-	if (!g_cursorTexture)
+	if (!g_cursorTexture.GetRef())
 	{
-		g_cursorTexture = InitializeTextureFromFile(MakeRelativeCitPath(L"citizen\\resources\\citizen_cursor.png"));
+		g_cursorTexture = InitializeTextureFromFile("citizen:/resources/citizen_cursor.png");
 	}
 }
 
-rage::grcTexture* CitizenNUIBackground::InitializeTextureFromFile(std::wstring filename)
+fwRefContainer<nui::GITexture> CitizenNUIBackground::InitializeTextureFromFile(const std::string& filename)
 {
 	ComPtr<IWICBitmapDecoder> decoder;
+	std::vector<uint8_t> v;
 
-	HRESULT hr = m_imagingFactory->CreateDecoderFromFilename(filename.c_str(), nullptr, GENERIC_READ, WICDecodeMetadataCacheOnDemand, decoder.GetAddressOf());
+	{
+		auto s = vfs::OpenRead(filename);
+
+		if (!s.GetRef())
+		{
+			return nullptr;
+		}
+
+		v = s->ReadToEnd();
+	}
+
+	auto stream = vfs::CreateComStream(vfs::OpenRead(fmt::sprintf("memory:$%016llx,%d,0:%s", (uintptr_t)v.data(), v.size(), filename)));
+	HRESULT hr = m_imagingFactory->CreateDecoderFromStream(stream.Get(), nullptr, WICDecodeMetadataCacheOnDemand, decoder.GetAddressOf());
 
 	if (SUCCEEDED(hr))
 	{
@@ -301,7 +325,7 @@ rage::grcTexture* CitizenNUIBackground::InitializeTextureFromFile(std::wstring f
 			// try to convert to a pixel format we like
 			frame.As(&source);
 
-			hr = WICConvertBitmapSource(GUID_WICPixelFormat32bppRGBA, source.Get(), convertedSource.GetAddressOf());
+			hr = WICConvertBitmapSource(GUID_WICPixelFormat32bppBGRA, source.Get(), convertedSource.GetAddressOf());
 
 			if (SUCCEEDED(hr))
 			{
@@ -315,20 +339,7 @@ rage::grcTexture* CitizenNUIBackground::InitializeTextureFromFile(std::wstring f
 
 			if (SUCCEEDED(hr))
 			{
-				rage::grcTextureReference reference;
-				memset(&reference, 0, sizeof(reference));
-				reference.width = width;
-				reference.height = height;
-				reference.depth = 1;
-				reference.stride = width * 4;
-#ifdef GTA_NY
-				reference.format = 1; // RGBA
-#elif defined(GTA_FIVE)
-				reference.format = 11; // should correspond to DXGI_FORMAT_B8G8R8A8_UNORM
-#endif
-				reference.pixelData = (uint8_t*)pixelData.data();
-
-				return rage::grcTextureFactory::getInstance()->createImage(&reference, nullptr);
+				return g_nuiGi->CreateTexture(width, height, nui::GITextureFormat::ARGB, pixelData.data());
 			}
 		}
 	}

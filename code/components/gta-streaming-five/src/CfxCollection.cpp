@@ -319,8 +319,6 @@ public:
 
 	~CfxCollection()
 	{
-		trace("del cfxcollection %p\n", (void*)this);
-
 		g_cfxCollections.erase(this);
 
 		PseudoCallContext(this)->~fiCollection();
@@ -330,11 +328,6 @@ public:
 
 	void CleanCloseCollection()
 	{
-		if (m_isPseudoPack)
-		{
-			trace("close packfile %s\n", GetName());
-		}
-
 		std::unique_lock<std::recursive_mutex> lock(m_mutex);
 
 		m_entries.clear();
@@ -1306,7 +1299,7 @@ static void PtrError()
 {
 	if (CoreIsDebuggerPresent())
 	{
-		__debugbreak();
+ 		__debugbreak();
 	}
 
 	FatalError("Invalid fixup, address is neither virtual nor physical (in %s)", GetCurrentStreamingName());
@@ -1886,6 +1879,11 @@ void origCfxCollection_AddStreamingFileByTag(const std::string& tag, const std::
 #endif
 }
 
+void origCfxCollection_BackoutStreamingTag(const std::string& tag)
+{
+	g_customStreamingFilesByTag.erase(tag);
+}
+
 /*void ForAllStreamingFiles(const std::function<void(const std::string&)>& cb)
 {
 	for (auto& entry : g_customStreamingFileRefs)
@@ -2061,9 +2059,18 @@ static std::unordered_set<std::string, IgnoreCaseHash, IgnoreCaseEqualTo> g_regi
 static std::map<uint32_t, std::string> g_hashes;
 
 std::string g_lastStreamingName;
+extern fwEvent<> OnReloadMapStore;
 
 static const char* RegisterStreamingFileStrchrWrap(const char* str, const int ch)
 {
+	// do this here, as it's early
+	static bool inited = ([]()
+	{
+		g_streamingPackfiles->Get(0).isHdd = false;
+
+		return true;
+	})();
+
 	// set the name for the later hook to use
 	g_lastStreamingName = str;
 
@@ -2215,6 +2222,11 @@ namespace streaming
 	}
 }
 
+static int ReturnTrue()
+{
+	return true;
+}
+
 #include <ICoreGameInit.h>
 #include <GameInit.h>
 
@@ -2246,6 +2258,12 @@ static HookFunction hookFunction([] ()
 			((CfxCollection*)collection)->Invalidate();
 		}
 	}, -500);
+
+	// will rescan dlc collisions, if a dlc collision is overriden it breaks(?)
+	OnReloadMapStore.Connect([]()
+	{
+		g_registeredFileSet.clear();
+	});
 
 	{
 		void* location = hook::pattern("41 B0 01 BA 1B E6 DA 93 E8").count(1).get(0).get<void>(-12);
@@ -2423,6 +2441,9 @@ static HookFunction hookFunction([] ()
 		hook::call(loc, RemoveStreamingPackfileWrap);
 	}
 #endif
+
+	// 'should packfile meta cache (pfm.dat) be used'
+	//hook::call(hook::get_pattern("E8 ? ? ? ? E8 ? ? ? ? 84 C0 0F 84 ? ? 00 00 44 39 35", 5), ReturnTrue);
 
 	// make the pfm.dat read-only
 	{

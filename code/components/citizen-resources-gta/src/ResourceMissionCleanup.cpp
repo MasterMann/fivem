@@ -9,7 +9,6 @@
 #include <Resource.h>
 #include <Error.h>
 
-#ifdef GTA_FIVE
 #include <ScriptHandlerMgr.h>
 #include <scrThread.h>
 #include <scrEngine.h>
@@ -60,6 +59,10 @@ struct DummyThread : public GtaThread
 
 static std::stack<rage::scrThread*> g_lastThreads;
 
+#if defined(MISCLEAN_HAS_SCRIPT_PROCESS_TICK)
+static std::stack<UpdatingScriptThreadsScope> g_scopes;
+#endif
+
 struct MissionCleanupData
 {
 	DummyThread* dummyThread;
@@ -81,6 +84,11 @@ static void DeleteDummyThread(DummyThread** dummyThread)
 {
 	__try
 	{
+		if (*dummyThread)
+		{
+			OnDeleteResourceThread(*dummyThread);
+		}
+
 		delete *dummyThread;
 	}
 	__except (EXCEPTION_EXECUTE_HANDLER)
@@ -90,6 +98,13 @@ static void DeleteDummyThread(DummyThread** dummyThread)
 
 	*dummyThread = nullptr;
 }
+
+static struct : GtaThread
+{
+	virtual void DoRun() override
+	{
+	}
+} g_globalLeftoverThread;
 
 static constexpr ManifestVersion mfVer1 = "05cfa83c-a124-4cfa-a768-c24a5811d8f9";
 
@@ -130,6 +145,9 @@ static InitFunction initFunction([] ()
 
 			if (data->cleanedUp)
 			{
+				g_lastThreads.push(rage::scrEngine::GetActiveThread());
+
+				rage::scrEngine::SetActiveThread(&g_globalLeftoverThread);
 				return;
 			}
 
@@ -144,6 +162,7 @@ static InitFunction initFunction([] ()
 			{
 				data->dummyThread = new DummyThread(resource);
 
+				OnCreateResourceThread(data->dummyThread, resource->GetName());
 				CGameScriptHandlerMgr::GetInstance()->AttachScript(data->dummyThread);
 
 				setScriptNow = true;
@@ -153,6 +172,11 @@ static InitFunction initFunction([] ()
 			GtaThread* gtaThread = data->dummyThread;
 
 			g_lastThreads.push(rage::scrEngine::GetActiveThread());
+
+#if defined(MISCLEAN_HAS_SCRIPT_PROCESS_TICK)
+			g_scopes.emplace(true);
+#endif
+
 			rage::scrEngine::SetActiveThread(gtaThread);
 
 			if (setScriptNow)
@@ -181,28 +205,28 @@ static InitFunction initFunction([] ()
 				return;
 			}
 
-			if (data->cleanedUp)
+#if defined(MISCLEAN_HAS_SCRIPT_PROCESS_TICK)
+			if (!g_scopes.empty())
 			{
-				return;
+				g_scopes.pop();
+			}
+#endif
+
+			rage::scrThread* lastThread = nullptr;
+
+			if (!g_lastThreads.empty())
+			{
+				lastThread = g_lastThreads.top();
+				g_lastThreads.pop();
 			}
 
-			{
-				rage::scrThread* lastThread = nullptr;
-
-				if (!g_lastThreads.empty())
-				{
-					lastThread = g_lastThreads.top();
-					g_lastThreads.pop();
-				}
-
-				// restore the last thread
-				rage::scrEngine::SetActiveThread(lastThread);
-			}
+			// restore the last thread
+			rage::scrEngine::SetActiveThread(lastThread);
 		}, 10000);
 
 		auto cleanupResource = [=]()
 		{
-			if (!Instance<ICoreGameInit>::Get()->GetGameLoaded())
+			if (!Instance<ICoreGameInit>::Get()->GetGameLoaded() || Instance<ICoreGameInit>::Get()->HasVariable("gameKilled"))
 			{
 				return;
 			}
@@ -242,4 +266,3 @@ static InitFunction initFunction([] ()
 		}, 10000);
 	}, -50);
 });
-#endif

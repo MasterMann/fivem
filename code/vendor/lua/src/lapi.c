@@ -359,6 +359,17 @@ LUA_API
 #ifdef _MSC_VER
 __forceinline
 #endif
+int
+  lua_uisnil(lua_State* L, int idx)
+{
+	const TValue* val = L->ci->func + idx;
+	return val->tt_ == LUA_TNIL;
+}
+
+LUA_API
+#ifdef _MSC_VER
+__forceinline
+#endif
 	int lua_asserttop(const lua_State* L, int idx) {
 
   const TValue *o = L->ci->func + idx;
@@ -385,6 +396,20 @@ LUA_API int lua_iscfunction (lua_State *L, int idx) {
   return (ttislcf(o) || (ttisCclosure(o)));
 }
 
+#if defined(GRIT_POWER_TTYPE)
+LUA_API int lua_tabletype (lua_State *L, int idx) {
+  StkId o;
+  int tt;
+
+  lua_lock(L);
+  o = index2addr(L, idx);
+  api_check(L, ttistable(o), "invalid table");
+  tt = luaH_type(hvalue(o));
+  lua_unlock(L);
+
+  return tt;
+}
+#endif
 
 LUA_API int lua_isinteger (lua_State *L, int idx) {
   StkId o = index2addr(L, idx);

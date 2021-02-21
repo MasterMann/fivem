@@ -25,6 +25,7 @@
 #include <Error.h>
 
 #include <LaunchMode.h>
+#include <CrossBuildRuntime.h>
 
 static hook::cdecl_stub<void()> lookAlive([] ()
 {
@@ -40,6 +41,10 @@ static inline int MapInitState(int initState)
 	if (initState >= 7)
 	{
 		if (g_isDigitalDistrib)
+		{
+			initState += 1;
+		}
+		else if (xbr::IsGameBuild<2060>())
 		{
 			initState += 1;
 		}
@@ -95,6 +100,11 @@ static volatile bool g_isNetworkKilled;
 static hook::cdecl_stub<void(int, int)> setupLoadingScreens([]()
 {
 	// trailing byte differs between 323 and 505
+	if (Is372())
+	{
+		return hook::get_call(hook::get_pattern("8D 4F 08 33 D2 E8 ? ? ? ? 40", 5));
+	}
+
 	return hook::get_call(hook::get_pattern("8D 4F 08 33 D2 E8 ? ? ? ? C6", 5));
 });
 
@@ -135,9 +145,10 @@ void FiveGameInit::LoadGameFirstLaunch(bool(*callBeforeLoad)())
 		{
 			if (*g_initState == 0)
 			{
-				trace("Triggering OnGameFinalizeLoad\n");
+				trace("^2Game finished loading!\n");
 
 				ClearVariable("shutdownGame");
+				ClearVariable("killedGameEarly");
 
 				OnGameFinalizeLoad();
 				isLoading = false;
@@ -164,6 +175,17 @@ void FiveGameInit::LoadGameFirstLaunch(bool(*callBeforeLoad)())
 		Instance<ICoreGameInit>::Get()->ClearVariable("networkInited");
 
 		SetRenderThreadOverride();
+
+		if (!Instance<ICoreGameInit>::Get()->GetGameLoaded())
+		{
+			Instance<ICoreGameInit>::Get()->SetVariable("killedGameEarly");
+			Instance<ICoreGameInit>::Get()->SetVariable("gameKilled");
+			Instance<ICoreGameInit>::Get()->SetVariable("shutdownGame");
+
+			AddCrashometry("kill_network_game_early", "true");
+
+			OnKillNetworkDone();
+		}
 	}, 500);
 
 	/*OnGameRequestLoad.Connect([=] ()
@@ -829,13 +851,6 @@ static void ErrorDo(uint32_t error)
 		FatalError("Invalid rage::fiPackfile encryption type specified. If you have any modified game files, please remove or verify them. See http://rsg.ms/verify for more information.");
 	}
 
-	if (Instance<ICoreGameInit>::Get()->OneSyncEnabled)
-	{
-		trace("OneSync enabled, sleeping for 2500ms to allow onesync log to flush...\n");
-
-		Sleep(2500);
-	}
-
 	trace("error function called from %p for code 0x%08x\n", _ReturnAddress(), error);
 
 	// provide pickup file for minidump handler to use
@@ -926,7 +941,7 @@ int ReturnFalse()
 
 int BlipAsIndex(int blip)
 {
-	assert(blip >= 0);
+	assert(blip != -1);
 
 	return (blip & 0xFFFF);
 }
@@ -1156,10 +1171,29 @@ void ShutdownSessionWrap()
 		OnMainGameFrame();
 
 		// 1604 (same as nethook)
-		((void(*)())hook::get_adjusted(0x1400067E8))();
-		((void(*)())hook::get_adjusted(0x1407D1960))();
-		((void(*)())hook::get_adjusted(0x140025F7C))();
-		((void(*)(void*))hook::get_adjusted(0x141595FD4))((void*)hook::get_adjusted(0x142DC9BA0));
+		// 1868
+		// 2060
+		if (Is2189())
+		{
+			((void (*)())hook::get_adjusted(0x140006748))();
+			((void (*)())hook::get_adjusted(0x1407F4150))();
+			((void (*)())hook::get_adjusted(0x140026120))();
+			((void (*)(void*))hook::get_adjusted(0x1415E4AC8))((void*)hook::get_adjusted(0x142E5C2D0));
+		}
+		else if (!Is2060())
+		{
+			((void(*)())hook::get_adjusted(0x1400067E8))();
+			((void(*)())hook::get_adjusted(0x1407D1960))();
+			((void(*)())hook::get_adjusted(0x140025F7C))();
+			((void(*)(void*))hook::get_adjusted(0x141595FD4))((void*)hook::get_adjusted(0x142DC9BA0));
+		}
+		else
+		{
+			((void (*)())hook::get_adjusted(0x140006A80))();
+			((void (*)())hook::get_adjusted(0x1407EB39C))();
+			((void (*)())hook::get_adjusted(0x1400263A4))();
+			((void (*)(void*))hook::get_adjusted(0x1415CF268))((void*)hook::get_adjusted(0x142D3DCC0));
+		}
 
 		g_runWarning();
 	}
@@ -1206,7 +1240,7 @@ static void OverrideArguments()
 #endif
 }
 
-static InitFunction initFunction([]()
+void Component_RunPreInit()
 {
 	// initialize console arguments
 	std::vector<std::pair<std::string, std::string>> setList;
@@ -1246,7 +1280,7 @@ static InitFunction initFunction([]()
 		}
 		catch (std::runtime_error& e)
 		{
-			trace("couldn't parse command line: %s\n", e.what());
+			//trace("couldn't parse command line: %s\n", e.what());
 		}
 	}
 
@@ -1256,7 +1290,60 @@ static InitFunction initFunction([]()
 	{
 		console::GetDefaultContext()->ExecuteSingleCommandDirect(ProgramArguments{ "set", set.first, set.second });
 	}
+}
+
+static bool WaitWithWait(HANDLE handle)
+{
+	return WaitForSingleObject(handle, 500) == WAIT_OBJECT_0;
+}
+
+static hook::cdecl_stub<void()> _setRenderDeleg([]
+{
+	return hook::get_pattern("48 89 5D 0F 48 8D 55 37 0F 10 4D 07 0F", -0xA7);
 });
+
+static hook::cdecl_stub<void(void*, bool)> _kickRender([]
+{
+	return hook::get_call(hook::get_pattern("E8 ? ? ? ? 45 33 FF 44 38 7B 0D 74 0E"));
+});
+
+static void (*g_origCtrlInit)();
+
+static void OnCtrlInit()
+{
+	uint8_t orig1, orig2, orig3;
+
+	static auto location1 = hook::get_pattern<uint8_t>("E8 ? ? ? ? 84 C0 74 1F 48 8B 05 ? ? ? ? 48 8B 40", 7);
+
+	{
+		orig1 = location1[0];
+		orig2 = location1[-0x5F];
+		hook::put<uint8_t>(location1, 0xEB);
+		hook::put<uint8_t>(location1 - 0x5F, 0xEB);
+	}
+
+	static auto location3 = hook::get_pattern<uint8_t>("33 D2 89 7C 24 44 66 C7", -0x37);
+
+	{
+		orig3 = *location3;
+		hook::return_function(location3);
+	}
+
+	static auto rti = hook::get_address<void*>(hook::get_pattern("E8 ? ? ? ? 45 33 FF 44 38 7B 0D 74 0E", -6));
+
+	_setRenderDeleg();
+	_kickRender(rti, true);
+
+	OnMainGameFrame.Connect([orig1, orig2, orig3]
+	{
+		hook::put<uint8_t>(location1, orig1);
+		hook::put<uint8_t>(location1 - 0x5F, orig2);
+		hook::put<uint8_t>(location3, orig3);
+	});
+
+	// orig
+	g_origCtrlInit();
+}
 
 static HookFunction hookFunction([] ()
 {
@@ -1288,7 +1375,7 @@ static HookFunction hookFunction([] ()
 	}
 
 	// NOP out any code that sets the 'entering state 2' (2, 0) FSM internal state to '7' (which is 'load game'), UNLESS it's digital distribution with standalone auth...
-	char* p = hook::pattern("BA 07 00 00 00 8D 41 FC 83 F8 01").count(1).get(0).get<char>(14);
+	char* p = (Is2060()) ? hook::pattern("BA 08 00 00 00 8D 41 FC 83 F8 01").count(1).get(0).get<char>(14) : hook::pattern("BA 07 00 00 00 8D 41 FC 83 F8 01").count(1).get(0).get<char>(14);
 
 	char* varPtr = p + 2;
 	g_initState = (int*)(varPtr + *(int32_t*)varPtr + 4);
@@ -1311,8 +1398,16 @@ static HookFunction hookFunction([] ()
 		// and call our little internal loop function from there
 		hook::call(p, WaitForInitLoop);
 
-		// also add a silly loop to state 6 ('wait for landing page'?)
-		p = hook::pattern("C7 05 ? ? ? ? 06 00 00 00 EB 3F").count(1).get(0).get<char>(0);
+		// also add a silly loop to state 6 ('wait for landing page'?) - or 20 in 2189+
+		if (!xbr::IsGameBuildOrGreater<2189>())
+		{
+			p = hook::pattern("C7 05 ? ? ? ? 06 00 00 00 EB 3F").count(1).get(0).get<char>(0);
+		}
+		else
+		{
+			p = hook::get_pattern<char>("85 C0 74 E8 83 F8 01 75 37", 0x20);
+
+		}
 
 		hook::nop(p, 10);
 		hook::call(p, WaitForInitLoopWrap);
@@ -1457,9 +1552,9 @@ static HookFunction hookFunction([] ()
 	g_extraContentMgr = (void**)(location + *(int32_t*)location + 4);
 
 	// loading screen frame limit
-	location = hook::pattern("0F 2F 05 ? ? ? ? 0F 82 E6 02 00 00").count(1).get(0).get<char>(3);
+	location = hook::pattern("0F 2F 05 ? ? ? ? 0F 82 ? ? ? ? E8 ? ? ? ? 48 89").count(1).get(0).get<char>(3);
 
-	hook::put<float>(location + *(int32_t*)location + 4, 1000.0f / 120.0f);
+	hook::put<float>(location + *(int32_t*)location + 4, 0.0f);
 
 	if (!CfxIsSinglePlayer())
 	{
@@ -1622,9 +1717,13 @@ static HookFunction hookFunction([] ()
 	// disable eventschedule.json refetching on failure
 	//hook::nop(hook::get_pattern("80 7F 2C 00 75 09 48 8D 4F F8 E8", 10), 5);
 	// 1493+:
-	hook::nop(hook::get_pattern("38 4B 2C 75 60 48 8D 4B F8 E8", 9), 5);
+	if (!Is372())
+	{
+		hook::nop(hook::get_pattern("38 4B 2C 75 60 48 8D 4B F8 E8", 9), 5);
+	}
 
 	// don't set pause on focus loss, force it to 0
+	if (!Is372())
 	{
 		auto location = hook::get_pattern<char>("0F 95 05 ? ? ? ? E8 ? ? ? ? 48 85 C0");
 		auto addy = hook::get_address<char*>(location + 3);
@@ -1655,5 +1754,45 @@ static HookFunction hookFunction([] ()
 			}
 		}
 	});
+
+	// fix 32:9 being interpreted as 3 spanned monitors
+	// (change 3.5 aspect cap to 3.6, which is enough to contain 3x 5:4, but does not contain 2x16:9 anymore)
+	{
+		auto location = hook::get_pattern<char>("EB ? 0F 2F 35 ? ? ? ? 76 ? 48 8B CF E8F", 5);
+		auto stubLoc = hook::AllocateStubMemory(4);
+
+		*(float*)stubLoc = 3.6f;
+
+		hook::put<int32_t>(location, int32_t(intptr_t(stubLoc) - intptr_t(location) - 4));
+	}
+
+	// SC eula accepted
+	hook::put<uint32_t>(hook::get_pattern("84 C0 74 36 48 8B 0D ? ? ? ? 48 85 C9", -13), 0x90C301B0);
+
+	// don't downscale photos a lot
+	hook::put<uint8_t>(hook::get_pattern("41 3B D9 72 09", 3), 0xEB);
+
+	// don't do 500ms waits for renderer
+	{
+		auto location = hook::get_pattern<char>("EB 0A B9 F4 01 00 00 E8", 7);
+		hook::nop(location, 5); // sleep call
+		hook::call(location + 21, WaitWithWait); // wait call
+	}
+
+	// kick renderer before slow dinput code
+	{
+		auto location = hook::get_pattern("74 0B E8 ? ? ? ? 8A 0D ? ? ? ? 80", 2);
+		hook::set_call(&g_origCtrlInit, location);
+		hook::call(location, OnCtrlInit);
+	}
+
+	// no showwindow early
+	if (!CfxIsSinglePlayer())
+	{
+		auto location = hook::get_pattern<char>("41 8B D4 48 8B C8 48 8B D8 FF 15", 9);
+		hook::nop(location, 6);
+		hook::nop(location + 9, 6);
+		hook::nop(location + 18, 6);
+	}
 });
 // C7 05 ? ? ? ? 07 00  00 00 E9

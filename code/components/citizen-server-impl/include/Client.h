@@ -16,7 +16,12 @@
 
 #include <se/Security.h>
 
-#define MAX_CLIENTS 128 // don't change this past 256 ever, also needs to be synced with client code
+#include <citizen_util/object_pool.h>
+#include <citizen_util/shared_reference.h>
+
+#include <shared_mutex>
+
+#define MAX_CLIENTS (1024 + 1) // don't change this past 256 ever, also needs to be synced with client code
 
 namespace {
 	using namespace std::literals::chrono_literals;
@@ -59,7 +64,8 @@ namespace fx
 		}
 	};
 
-	class SERVER_IMPL_EXPORT Client : public ComponentHolderImpl<Client>, public std::enable_shared_from_this<Client>
+
+	class SERVER_IMPL_EXPORT Client : public ComponentHolderImpl<Client>, public se::PrincipalSource
 	{
 	public:
 		Client(const std::string& guid);
@@ -110,7 +116,7 @@ namespace fx
 			return (m_peer) ? *m_peer.get() : 0;
 		}
 
-		inline const std::string& GetName()
+		inline const std::string& GetName()	
 		{
 			return m_name;
 		}
@@ -149,6 +155,11 @@ namespace fx
 			return m_identifiers;
 		}
 
+		inline const std::vector<std::string>& GetTokens()
+		{
+			return m_tokens;
+		}
+
 		inline bool HasRouted()
 		{
 			return m_hasRouted;
@@ -166,18 +177,27 @@ namespace fx
 			UpdateCachedPrincipalValues();
 		}
 
+		inline void AddToken(const std::string& token)
+		{
+			m_tokens.emplace_back(token);
+		}
+
 		inline auto EnterPrincipalScope()
 		{
-			// since fixed_list contains the buffer inside of itself, and we have to move something unmoveable (since reference_wrapper-holding
-			// Principal instances would be allocated on the stack), we'll take *one* allocation on the heap.
-			auto principals = std::make_unique<eastl::fixed_list<se::ScopedPrincipal, 10, false>>();
+			auto principal = std::make_unique<se::ScopedPrincipal>(this);
 
+			return std::move(principal);
+		}
+
+		inline void GetPrincipals(const std::function<bool(const se::Principal&)>& iterator)
+		{
 			for (auto& principal : m_principals)
 			{
-				principals->emplace_back(principal);
+				if (iterator(principal))
+				{
+					break;
+				}
 			}
-
-			return std::move(principals);
 		}
 
 		inline std::shared_ptr<sync::ClientSyncDataBase> GetSyncData()
@@ -207,6 +227,16 @@ namespace fx
 			}
 		}
 
+		inline bool IsDropping() const
+		{
+			return m_dropping;
+		}
+
+		inline void SetDropping()
+		{
+			m_dropping = true;
+		}
+
 		const std::any& GetData(const std::string& key);
 
 		void SetData(const std::string& key, const std::any& data);
@@ -217,6 +247,8 @@ namespace fx
 		fwEvent<> OnAssignPeer;
 		fwEvent<> OnAssignTcpEndPoint;
 		fwEvent<> OnAssignConnectionToken;
+
+		fwEvent<> OnCreatePed;
 
 		fwEvent<> OnDrop;
 
@@ -229,6 +261,8 @@ namespace fx
 			{
 				m_principals.emplace_back(se::Principal{ fmt::sprintf("identifier.%s", identifier) });
 			}
+
+			m_principals.emplace_back(se::Principal{ fmt::sprintf("player.%d", m_netId) });
 		}
 
 	private:
@@ -246,6 +280,9 @@ namespace fx
 
 		// the client's identifiers
 		std::vector<std::string> m_identifiers;
+
+		// the client's tokens
+		std::vector<std::string> m_tokens;
 
 		// the client's netid
 		uint32_t m_netId;
@@ -279,5 +316,13 @@ namespace fx
 
 		// principal values
 		std::list<se::Principal> m_principals;
+
+		// whether the client is currently being dropped
+		volatile bool m_dropping;
 	};
+
+	inline object_pool<Client, 512 * 1024> clientPool;
+
+	using ClientSharedPtr = shared_reference<Client, &clientPool>;
+	using ClientWeakPtr = weak_reference<ClientSharedPtr>;
 }

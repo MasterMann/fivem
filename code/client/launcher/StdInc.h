@@ -5,7 +5,9 @@
  * regarding licensing.
  */
 
+#ifndef COMPILING_GLUE
 #include "../shared/StdInc.h"
+#endif
 
 int DL_RequestURL(const char* url, char* buffer, size_t bufSize);
 const char* DL_RequestURLError();
@@ -44,6 +46,7 @@ bool CheckFileOutdatedWithUI(const wchar_t* fileName, const std::vector<std::arr
 
 #include "LauncherConfig.h"
 
+#ifdef LAUNCHER_PERSONALITY_MAIN
 // cppwinrt is slow, add it to pch
 #include <unknwn.h>
 
@@ -58,6 +61,30 @@ bool CheckFileOutdatedWithUI(const wchar_t* fileName, const std::vector<std::arr
 #include <winrt/Windows.UI.Xaml.Markup.h>
 #include <winrt/Windows.UI.Core.h>
 #include <winrt/Windows.UI.Xaml.Controls.Primitives.h>
+#endif
+
+#ifdef _DEBUG
+#define LAUNCHER_PERSONALITY_GAME
+#endif
+
+// game personality aliases
+#ifdef GTA_FIVE
+#ifdef LAUNCHER_PERSONALITY_GAME_2060
+#define LAUNCHER_PERSONALITY_GAME
+#elif defined(LAUNCHER_PERSONALITY_GAME_2189)
+#define LAUNCHER_PERSONALITY_GAME
+#elif defined(LAUNCHER_PERSONALITY_GAME_372)
+#define LAUNCHER_PERSONALITY_GAME
+#elif defined(LAUNCHER_PERSONALITY_GAME_1604)
+#define LAUNCHER_PERSONALITY_GAME
+#endif
+#elif defined(IS_RDR3)
+#ifdef LAUNCHER_PERSONALITY_GAME_1311
+#define LAUNCHER_PERSONALITY_GAME
+#elif defined(LAUNCHER_PERSONALITY_GAME_1355)
+#define LAUNCHER_PERSONALITY_GAME
+#endif
+#endif
 
 struct TenUIBase
 {

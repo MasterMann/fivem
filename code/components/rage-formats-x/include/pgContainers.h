@@ -15,6 +15,8 @@
 #define RAGE_FORMATS_ny_pgContainers 1
 #elif defined(RAGE_FORMATS_GAME_PAYNE)
 #define RAGE_FORMATS_payne_pgContainers 1
+#elif defined(RAGE_FORMATS_GAME_RDR3)
+#define RAGE_FORMATS_rdr3_pgContainers 1
 #endif
 
 #if defined(RAGE_FORMATS_GAME_FIVE)
@@ -116,6 +118,7 @@ public:
 	}
 };
 
+#pragma pack(push, 1)
 template<typename TValue>
 class pgObjectArray : public pgStreamableBase
 {
@@ -151,6 +154,12 @@ public:
 		for (int i = 0; i < count; i++)
 		{
 			auto object = *(objects[i]);
+
+			if (!object)
+			{
+				(*m_objects)[i] = nullptr;
+				continue;
+			}
 
 			if (pgStreamManager::IsInBlockMap(object, nullptr, false))
 			{
@@ -230,10 +239,15 @@ public:
 		for (int i = 0; i < m_size; i++)
 		{
 			(*m_objects)[i].Resolve(blockMap);
-			(*m_objects)[i]->Resolve(blockMap);
+
+			if (!(*m_objects)[i].IsNull())
+			{
+				(*m_objects)[i]->Resolve(blockMap);
+			}
 		}
 	}
 };
+#pragma pack(pop)
 
 template<typename TValue>
 class pgDictionary : public pgBase

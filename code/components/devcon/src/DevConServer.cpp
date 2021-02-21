@@ -17,6 +17,7 @@
 #include <MultiplexTcpServer.h>
 #include <HttpServerImpl.h>
 
+#include <CL2LaunchMode.h>
 #include <ResourceManager.h>
 #include <Profiler.h>
 
@@ -143,7 +144,8 @@ static void FlushKnownCommands(net::TcpServerStream* stream)
 		buf.Write<uint16_t>(0);
 
 		char cmdBuf[64];
-		strcpy_s(cmdBuf, cmd.c_str());
+		strncpy(cmdBuf, cmd.c_str(), sizeof(cmdBuf));
+		cmdBuf[63] = '\0';
 
 		buf.Write(cmdBuf, sizeof(cmdBuf));
 
@@ -249,8 +251,9 @@ static InitFunction initFunction([]()
 		}
 	}).detach();
 
+	static int tcpServerPort = IsCL2() ? 29200 : 29100;
 	static fwRefContainer<net::TcpServerManager> tcpStack = new net::TcpServerManager();
-	static fwRefContainer<net::TcpServer> tcpServer = tcpStack->CreateServer(net::PeerAddress::FromString("0.0.0.0:29100", 29100, net::PeerAddress::LookupType::NoResolution).get());
+	static fwRefContainer<net::TcpServer> tcpServer = tcpStack->CreateServer(net::PeerAddress::FromString(fmt::sprintf("0.0.0.0:%d", tcpServerPort), tcpServerPort, net::PeerAddress::LookupType::NoResolution).get());
 
 	if (!tcpServer.GetRef())
 	{
@@ -325,7 +328,7 @@ static InitFunction initFunction([]()
 		}
 
 		response->SetStatusCode(404);
-		response->End(fmt::sprintf("Route %s not found.", request->GetPath()));
+		response->End(fmt::sprintf("Route %s not found.", std::string_view{ request->GetPath().c_str() }));
 
 		return true;
 	};
@@ -417,4 +420,14 @@ static InitFunction initFunction([]()
 		});
 	});
 });
+
+void* operator new[](size_t size, const char* pName, int flags, unsigned debugFlags, const char* file, int line)
+{
+	return ::operator new[](size);
+}
+
+void* operator new[](size_t size, size_t alignment, size_t alignmentOffset, const char* pName, int flags, unsigned debugFlags, const char* file, int line)
+{
+	return ::operator new[](size);
+}
 #endif

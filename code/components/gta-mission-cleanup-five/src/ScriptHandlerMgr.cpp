@@ -12,12 +12,77 @@
 
 #include "Pool.h"
 
+#include <MinHook.h>
+
+#include <CrossBuildRuntime.h>
+
 #include <Error.h>
 
 // pool functions, here temporarily we hope :)
 static atPoolBase** g_scriptHandlerNetworkPool;
 
 static CGameScriptHandlerMgr* g_scriptHandlerMgr;
+
+static rage::scrThread*(*g_origGetThreadById)(uint32_t hash);
+
+static std::map<uint32_t, rage::scrThread*> g_customThreads;
+static std::map<uint32_t, std::string> g_customThreadsToNames;
+
+static bool* CTheScripts__ms_bUpdatingScriptThreads;
+
+UpdatingScriptThreadsScope::UpdatingScriptThreadsScope(bool newState)
+{
+	m_lastProcessTick = *CTheScripts__ms_bUpdatingScriptThreads;
+	*CTheScripts__ms_bUpdatingScriptThreads = newState;
+}
+
+UpdatingScriptThreadsScope::~UpdatingScriptThreadsScope()
+{
+	if (m_lastProcessTick)
+	{
+		*CTheScripts__ms_bUpdatingScriptThreads = *m_lastProcessTick;
+	}
+}
+
+static rage::scrThread* GetThreadById(uint32_t hash)
+{
+	auto it = g_customThreads.find(hash);
+
+	if (it != g_customThreads.end())
+	{
+		return it->second;
+	}
+
+	return g_origGetThreadById(hash);
+}
+
+struct CGameScriptId
+{
+	void* vtbl;
+	uint32_t hash;
+	char scriptName[32];
+};
+
+static void (*g_origCGameScriptId__updateScriptName)(CGameScriptId* self);
+
+static void CGameScriptId__updateScriptName(CGameScriptId* self)
+{
+	self->scriptName[0] = '\0';
+	g_origCGameScriptId__updateScriptName(self);
+
+	if (self->scriptName[0] == '\0')
+	{
+		auto thread = g_customThreadsToNames.find(self->hash);
+
+		if (thread != g_customThreadsToNames.end())
+		{
+			strcpy_s(self->scriptName, thread->second.c_str());
+		}
+	}
+}
+
+DLL_EXPORT fwEvent<rage::scrThread*, const std::string&> OnCreateResourceThread;
+DLL_EXPORT fwEvent<rage::scrThread*> OnDeleteResourceThread;
 
 // find data fields and perform patches
 static HookFunction hookFunction([] ()
@@ -36,12 +101,40 @@ static HookFunction hookFunction([] ()
 	location = hook::pattern("48 8D 55 17 48 8D 0D ? ? ? ? FF").count(1).get(0).get<char>(7);
 
 	g_scriptHandlerMgr = (CGameScriptHandlerMgr*)(location + *(int32_t*)location + 4);
+
+	// script threads for dummies
+	MH_Initialize();
+	MH_CreateHook(hook::get_pattern("33 D2 44 8B C1 85 C9 74 2B 0F"), GetThreadById, (void**)&g_origGetThreadById);
+	MH_CreateHook(hook::get_pattern("48 8D 44 24 30 44 39 10 74 20 8B 10 48 8D 0D ? ? ? ? E8", -0xA6), CGameScriptId__updateScriptName, (void**)&g_origCGameScriptId__updateScriptName);
+	MH_EnableHook(MH_ALL_HOOKS);
+
+	OnCreateResourceThread.Connect([](rage::scrThread* thread, const std::string& name)
+	{
+		g_customThreads.insert({ thread->GetContext()->ThreadId, thread });
+		g_customThreadsToNames.insert({ thread->GetContext()->ThreadId, name });
+	});
+
+	OnDeleteResourceThread.Connect([](rage::scrThread* thread)
+	{
+		g_customThreads.erase(thread->GetContext()->ThreadId);
+		g_customThreadsToNames.erase(thread->GetContext()->ThreadId);
+	});
+
+	// 1868+
+	if (xbr::IsGameBuildOrGreater<2060>())
+	{
+		hook::put<uint8_t>(hook::get_pattern("74 19 FF C1 48 83 C0 04"), 0xEB);
+	}
 });
 
 // functions
 static hook::thiscall_stub<void(CGameScriptHandlerNetwork*, rage::scrThread*)> scriptHandlerNetwork__ctor([] ()
 {
-	//return hook::pattern("33 C0 48 89 83 A0 00 00 00 66 89 83 A8").count(1).get(0).get<void>(-0x18);
+	if (Is372())
+	{
+		return hook::pattern("33 C0 48 89 83 A0 00 00 00 66 89 83 A8").count(1).get(0).get<void>(-0x18);
+	}
+
 	return hook::pattern("33 C0 48 89 83 A0 00 00 00 89 83 A8 00 00 00 66 89 83 AC 00").count(1).get(0).get<void>(-0x18);
 });
 
@@ -145,4 +238,6 @@ static HookFunction hookFunctionVtbl([]()
 		g_origDetachScript = ((decltype(g_origDetachScript))vtable[11]);
 		vtable[11] = (uintptr_t)WrapDetachScript;
 	}
+
+	CTheScripts__ms_bUpdatingScriptThreads = hook::get_address<bool*>(hook::get_pattern("45 33 F6 41 8A F0 8B EA 44 38 35", 11));
 });

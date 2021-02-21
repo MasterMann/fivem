@@ -8,6 +8,7 @@
 
 #include <Resource.h>
 #include <fxScripting.h>
+#include <CL2LaunchMode.h>
 
 leveldb::Env* GetVFSEnvironment();
 
@@ -21,7 +22,8 @@ struct DatabaseHolder
 		options.env = GetVFSEnvironment();
 		options.create_if_missing = true;
 
-		auto status = leveldb::DB::Open(options, "fxd:/kvs/", &dbPointer);
+		std::string dbName = IsCL2() ? "fxd:/kvs_cl2/" : "fxd:/kvs/";
+		auto status = leveldb::DB::Open(options, dbName, &dbPointer);
 
 		if (!status.ok())
 		{
@@ -32,18 +34,18 @@ struct DatabaseHolder
 				repairOptions.create_if_missing = true;
 				repairOptions.env = GetVFSEnvironment();
 				
-				status = leveldb::RepairDB("fxd:/kvs/", repairOptions);
+				status = leveldb::RepairDB(dbName, repairOptions);
 
 				if (status.ok())
 				{
-					status = leveldb::DB::Open(options, "fxd:/kvs/", &dbPointer);
+					status = leveldb::DB::Open(options, dbName, &dbPointer);
 				}
 
 				if (!status.ok())
 				{
-					status = leveldb::DestroyDB("fxd:/kvs/", options);
+					status = leveldb::DestroyDB(dbName, options);
 
-					status = leveldb::DB::Open(options, "fxd:/kvs/", &dbPointer);
+					status = leveldb::DB::Open(options, dbName, &dbPointer);
 				}
 			}
 		}
@@ -96,7 +98,7 @@ static std::string FormatKey(const char* key, const std::string& resource = {})
 static void PutResourceKvp(fx::ScriptContext& context, const char* data, size_t size)
 {
 	auto db = EnsureDatabase();
-	auto key = FormatKey(context.GetArgument<const char*>(0));
+	auto key = FormatKey(context.CheckArgument<const char*>(0));
 
 	leveldb::WriteOptions options;
 	options.sync = true;
@@ -109,7 +111,7 @@ static void SetResourceKvp(fx::ScriptContext& context)
 {
 	msgpack::sbuffer buffer;
 	msgpack::packer<msgpack::sbuffer> packer(buffer);
-	packer.pack(context.GetArgument<T>(1));
+	packer.pack(std::is_pointer_v<T> ? context.CheckArgument<T>(1) : context.GetArgument<T>(1));
 
 	PutResourceKvp(context, buffer.data(), buffer.size());
 }

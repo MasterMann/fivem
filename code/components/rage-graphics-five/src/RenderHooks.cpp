@@ -17,17 +17,29 @@
 
 #include <Error.h>
 
+#include <CL2LaunchMode.h>
+
 #include <CoreConsole.h>
 
 #include <HostSharedData.h>
 
 namespace WRL = Microsoft::WRL;
 
+void WakeWindowThreadFor(std::function<void()>&& func);
+
 fwEvent<> OnGrcCreateDevice;
 fwEvent<> OnPostFrontendRender;
 
+fwEvent<IDXGISwapChain*, int, int> OnPreD3DPresent;
+fwEvent<IDXGISwapChain*, int, int> OnPostD3DPresent;
+
+DLL_EXPORT fwEvent<bool*> OnFlipModelHook;
+
 fwEvent<bool*> OnRequestInternalScreenshot;
 fwEvent<const uint8_t*, int, int> OnInternalScreenshot;
+
+static void* g_lastBackbufTexture;
+static bool g_useFlipModel = false;
 
 static bool g_overrideVsync;
 
@@ -52,15 +64,6 @@ static void InvokeRender()
 		OnGrcCreateDevice();
 	});
 
-	uintptr_t a1;
-	uintptr_t a2;
-
-	EnqueueGenericDrawCommand([](uintptr_t, uintptr_t)
-	{
-		CaptureBufferOutput();
-		CaptureInternalScreenshot();
-	}, &a1, &a2);
-
 	OnPostFrontendRender();
 }
 
@@ -77,20 +80,358 @@ void MakeDummyDevice(ID3D11Device** device, ID3D11DeviceContext** context, const
 
 fwEvent<IDXGIFactory2*, ID3D11Device*, HWND, DXGI_SWAP_CHAIN_DESC1*, DXGI_SWAP_CHAIN_FULLSCREEN_DESC*, IDXGISwapChain1**> OnTryCreateSwapChain;
 
-static HRESULT CreateD3D11DeviceWrap(_In_opt_ IDXGIAdapter* pAdapter, D3D_DRIVER_TYPE DriverType, HMODULE Software, UINT Flags, _In_reads_opt_(FeatureLevels) CONST D3D_FEATURE_LEVEL* pFeatureLevels, UINT FeatureLevels, UINT SDKVersion, _In_opt_ CONST DXGI_SWAP_CHAIN_DESC* pSwapChainDesc, _Out_opt_ IDXGISwapChain** ppSwapChain, _Out_opt_ ID3D11Device** ppDevice, _Out_opt_ D3D_FEATURE_LEVEL* pFeatureLevel, _Out_opt_ ID3D11DeviceContext** ppImmediateContext)
+#include <HostSharedData.h>
+#include <ReverseGameData.h>
+#include <CfxState.h>
+
+#include <dcomp.h>
+
+#pragma comment(lib, "dcomp.lib")
+
+#include <mmsystem.h>
+
+class BufferBackedDXGISwapChain : public WRL::RuntimeClass<WRL::RuntimeClassFlags<WRL::ClassicCom>, IDXGISwapChain>
 {
-	auto uiExitEvent = CreateEvent(NULL, FALSE, FALSE, L"CitizenFX_PreUIExit");
-	auto uiDoneEvent = CreateEvent(NULL, FALSE, FALSE, L"CitizenFX_PreUIDone");
+public:
+	// Inherited via RuntimeClass
+	virtual HRESULT SetPrivateData(REFGUID Name, UINT DataSize, const void * pData) override
+	{
+		return E_NOTIMPL;
+	}
+	virtual HRESULT SetPrivateDataInterface(REFGUID Name, const IUnknown * pUnknown) override
+	{
+		return E_NOTIMPL;
+	}
+	virtual HRESULT GetPrivateData(REFGUID Name, UINT * pDataSize, void * pData) override
+	{
+		return E_NOTIMPL;
+	}
+	virtual HRESULT GetParent(REFIID riid, void ** ppParent) override
+	{
+		return E_NOTIMPL;
+	}
+	virtual HRESULT GetDevice(REFIID riid, void ** ppDevice) override
+	{
+		trace("GetDevice\n");
+
+		return E_NOTIMPL;
+	}
+	virtual HRESULT Present(UINT SyncInterval, UINT Flags) override
+	{
+		if (Flags & DXGI_PRESENT_TEST)
+		{
+			// TODO: request more information from the device/host game
+			return S_OK;
+		}
+
+		static HostSharedData<ReverseGameData> rgd("CfxReverseGameData");
+
+		int idx = rgd->GetNextSurface(INFINITE);
+
+		if (idx >= 0)
+		{
+			auto surface = m_frontTextures[idx];
+			WRL::ComPtr<IDXGIKeyedMutex> mutex;
+
+			GetD3D11DeviceContext()->CopyResource(surface.Get(), m_texture.Get());
+			rgd->SubmitSurface();
+		}
+		else
+		{
+			trace("frame dropped - presenter was busy?\n");
+		}
+
+		return S_OK;
+	}
+	virtual HRESULT GetBuffer(UINT Buffer, REFIID riid, void ** ppSurface) override
+	{
+		//trace("GetBuffer %d\n", Buffer);
+
+		if (Buffer == 0)
+		{
+			return m_texture.CopyTo(riid, ppSurface);
+		}
+
+		return E_NOTIMPL;
+	}
+	virtual HRESULT SetFullscreenState(BOOL Fullscreen, IDXGIOutput * pTarget) override
+	{
+		//trace("SetFullscreenState %d\n", Fullscreen);
+
+		return S_OK;
+	}
+	virtual HRESULT GetFullscreenState(BOOL * pFullscreen, IDXGIOutput ** ppTarget) override
+	{
+		//trace("GetFullscreenState\n");
+
+		*pFullscreen = FALSE;
+		return S_OK;
+	}
+
+private:
+	WRL::ComPtr<ID3D11Texture2D> m_texture;
+	WRL::ComPtr<ID3D11Texture2D> m_frontTextures[4];
+
+public:
+	DXGI_SWAP_CHAIN_DESC desc;
+	ID3D11Device* device;
+
+	BufferBackedDXGISwapChain(ID3D11Device* device, DXGI_SWAP_CHAIN_DESC desc)
+		: desc(desc), device(device)
+	{
+		RecreateFromDesc();
+	}
+
+private:
+	void RecreateFromDesc()
+	{
+		D3D11_TEXTURE2D_DESC tdesc = CD3D11_TEXTURE2D_DESC(desc.BufferDesc.Format, desc.BufferDesc.Width, desc.BufferDesc.Height, 1, 1, D3D11_BIND_SHADER_RESOURCE, D3D11_USAGE_DEFAULT, 0, 1, 0, /*D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX*/ D3D11_RESOURCE_MISC_SHARED);
+
+		static HostSharedData<ReverseGameData> rgd("CfxReverseGameData");
+
+		if (rgd->twidth != desc.BufferDesc.Width || rgd->theight != desc.BufferDesc.Height)
+		{
+			rgd->twidth = desc.BufferDesc.Width;
+			rgd->theight = desc.BufferDesc.Height;
+
+			rgd->editWidth = true;
+		}
+
+		for (int i = 0; i < std::size(m_frontTextures); i++)
+		{
+			WRL::ComPtr<ID3D11Texture2D> tex;
+			device->CreateTexture2D(&tdesc, nullptr, tex.ReleaseAndGetAddressOf());
+
+			m_frontTextures[i] = tex;
+
+			WRL::ComPtr<IDXGIResource> res;
+
+			if (SUCCEEDED(tex.As(&res)))
+			{
+				HANDLE hdl;
+				res->GetSharedHandle(&hdl);
+
+				rgd->surfaces[i] = hdl;
+			}
+		}
+
+		tdesc.MiscFlags &= ~D3D11_RESOURCE_MISC_SHARED;
+		tdesc.BindFlags |= D3D11_BIND_RENDER_TARGET;
+		device->CreateTexture2D(&tdesc, nullptr, m_texture.ReleaseAndGetAddressOf());
+
+		if (rgd->inited)
+		{
+			rgd->createHandles = true;
+		}
+
+		rgd->inited = true;
+	}
+
+public:
+
+	virtual HRESULT GetDesc(DXGI_SWAP_CHAIN_DESC * pDesc) override
+	{
+		*pDesc = desc;
+		return S_OK;
+	}
+	virtual HRESULT ResizeBuffers(UINT BufferCount, UINT Width, UINT Height, DXGI_FORMAT NewFormat, UINT SwapChainFlags) override
+	{
+		desc.BufferCount = BufferCount;
+		desc.BufferDesc.Width = Width;
+		desc.BufferDesc.Height = Height;
+		desc.BufferDesc.Format = NewFormat;
+		desc.Flags = SwapChainFlags;
+
+		RecreateFromDesc();
+
+		return S_OK;
+	}
+	virtual HRESULT ResizeTarget(const DXGI_MODE_DESC * pNewTargetParameters) override
+	{
+		return S_OK;
+	}
+	virtual HRESULT GetContainingOutput(IDXGIOutput ** ppOutput) override
+	{
+		return S_OK;
+	}
+	virtual HRESULT GetFrameStatistics(DXGI_FRAME_STATISTICS * pStats) override
+	{
+		return S_OK;
+	}
+	virtual HRESULT GetLastPresentCount(UINT * pLastPresentCount) override
+	{
+		return S_OK;
+	}
+};
+
+class DeferredFullscreenSwapChain : public WRL::RuntimeClass<WRL::RuntimeClassFlags<WRL::ClassicCom>, IDXGISwapChain>
+{
+	WRL::ComPtr<IDXGISwapChain> m_orig;
+	bool m_defer = true;
+
+public:
+	DeferredFullscreenSwapChain(WRL::ComPtr<IDXGISwapChain> swapChain)
+		: m_orig(swapChain)
+	{
+	
+	}
+
+	virtual HRESULT __stdcall SetPrivateData(REFGUID Name, UINT DataSize, const void* pData) override
+	{
+		return E_NOTIMPL;
+	}
+	virtual HRESULT __stdcall SetPrivateDataInterface(REFGUID Name, const IUnknown* pUnknown) override
+	{
+		return E_NOTIMPL;
+	}
+	virtual HRESULT __stdcall GetPrivateData(REFGUID Name, UINT* pDataSize, void* pData) override
+	{
+		return E_NOTIMPL;
+	}
+	virtual HRESULT __stdcall GetParent(REFIID riid, void** ppParent) override
+	{
+		return E_NOTIMPL;
+	}
+	virtual HRESULT __stdcall GetDevice(REFIID riid, void** ppDevice) override
+	{
+		return E_NOTIMPL;
+	}
+	virtual HRESULT __stdcall Present(UINT SyncInterval, UINT Flags) override
+	{
+		return m_orig->Present(SyncInterval, Flags);
+	}
+	virtual HRESULT __stdcall GetBuffer(UINT Buffer, REFIID riid, void** ppSurface) override
+	{
+		return m_orig->GetBuffer(Buffer, riid, ppSurface);
+	}
+	virtual HRESULT __stdcall SetFullscreenState(BOOL Fullscreen, IDXGIOutput* pTarget) override
+	{
+		if (m_defer && !Fullscreen)
+		{
+			m_defer = false;
+		}
+
+		return m_orig->SetFullscreenState(Fullscreen, pTarget);
+	}
+	virtual HRESULT __stdcall GetFullscreenState(BOOL* pFullscreen, IDXGIOutput** ppTarget) override
+	{
+		auto rv = m_orig->GetFullscreenState(pFullscreen, ppTarget);
+
+		if (SUCCEEDED(rv))
+		{
+			if (m_defer)
+			{
+				if (!*pFullscreen)
+				{
+					WRL::ComPtr<IDXGIOutput> output;
+					
+					if (SUCCEEDED(m_orig->GetContainingOutput(&output)) && output.Get())
+					{
+						m_orig->SetFullscreenState(TRUE, output.Get());
+
+						if (ppTarget)
+						{
+							output.CopyTo(ppTarget);
+						}
+
+						*pFullscreen = true;
+					}
+				}
+				else
+				{
+					m_defer = false;
+				}
+			}
+		}
+
+		return rv;
+	}
+	virtual HRESULT __stdcall GetDesc(DXGI_SWAP_CHAIN_DESC* pDesc) override
+	{
+		return m_orig->GetDesc(pDesc);
+	}
+	virtual HRESULT __stdcall ResizeBuffers(UINT BufferCount, UINT Width, UINT Height, DXGI_FORMAT NewFormat, UINT SwapChainFlags) override
+	{
+		return m_orig->ResizeBuffers(BufferCount, Width, Height, NewFormat, SwapChainFlags);
+	}
+	virtual HRESULT __stdcall ResizeTarget(const DXGI_MODE_DESC* pNewTargetParameters) override
+	{
+		return m_orig->ResizeTarget(pNewTargetParameters);
+	}
+	virtual HRESULT __stdcall GetContainingOutput(IDXGIOutput** ppOutput) override
+	{
+		return E_NOTIMPL;
+	}
+	virtual HRESULT __stdcall GetFrameStatistics(DXGI_FRAME_STATISTICS* pStats) override
+	{
+		return E_NOTIMPL;
+	}
+	virtual HRESULT __stdcall GetLastPresentCount(UINT* pLastPresentCount) override
+	{
+		return E_NOTIMPL;
+	}
+};
+
+#include <dxgi1_6.h>
+
+#pragma comment(lib, "dxgi.lib")
+#pragma comment(lib, "dxguid.lib")
+
+static HANDLE g_gameWindowEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
+
+void DLL_EXPORT UiDone()
+{
+	static HostSharedData<CfxState> initState("CfxInitState");
+	WaitForSingleObject(g_gameWindowEvent, INFINITE);
+
+	auto uiExitEvent = CreateEvent(NULL, FALSE, FALSE, va(L"CitizenFX_PreUIExit%s", IsCL2() ? L"CL2" : L""));
+	auto uiDoneEvent = CreateEvent(NULL, FALSE, FALSE, va(L"CitizenFX_PreUIDone%s", IsCL2() ? L"CL2" : L""));
 
 	if (uiExitEvent)
 	{
 		SetEvent(uiExitEvent);
 	}
 
-	if (uiDoneEvent)
+	if (uiDoneEvent && !g_disableRendering)
 	{
 		WaitForSingleObject(uiDoneEvent, INFINITE);
 	}
+}
+
+static HRESULT CreateD3D11DeviceWrapOrig(_In_opt_ IDXGIAdapter* pAdapter, D3D_DRIVER_TYPE DriverType, HMODULE Software, UINT Flags, _In_reads_opt_(FeatureLevels) CONST D3D_FEATURE_LEVEL* pFeatureLevels, UINT FeatureLevels, UINT SDKVersion, _In_opt_ CONST DXGI_SWAP_CHAIN_DESC* pSwapChainDesc, _Out_opt_ IDXGISwapChain** ppSwapChain, _Out_opt_ ID3D11Device** ppDevice, _Out_opt_ D3D_FEATURE_LEVEL* pFeatureLevel, _Out_opt_ ID3D11DeviceContext** ppImmediateContext)
+{
+	{
+		WRL::ComPtr<IDXGIFactory1> dxgiFactory;
+		CreateDXGIFactory1(IID_IDXGIFactory1, &dxgiFactory);
+
+		WRL::ComPtr<IDXGIAdapter1> adapter;
+		WRL::ComPtr<IDXGIFactory6> factory6;
+		HRESULT hr = dxgiFactory.As(&factory6);
+		if (SUCCEEDED(hr))
+		{
+			for (UINT adapterIndex = 0;
+				DXGI_ERROR_NOT_FOUND != factory6->EnumAdapterByGpuPreference(
+					adapterIndex,
+					DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE,
+					IID_PPV_ARGS(adapter.ReleaseAndGetAddressOf()));
+				adapterIndex++)
+			{
+				DXGI_ADAPTER_DESC1 desc;
+				adapter->GetDesc1(&desc);
+
+				if (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE)
+				{
+					// Don't select the Basic Render Driver adapter.
+					continue;
+				}
+
+				adapter.CopyTo(&pAdapter);
+				break;
+			}
+		}
+	}
+
+	SetEvent(g_gameWindowEvent);
 
 	if (g_disableRendering)
 	{
@@ -103,15 +444,19 @@ static HRESULT CreateD3D11DeviceWrap(_In_opt_ IDXGIAdapter* pAdapter, D3D_DRIVER
 
 	if (!IsWindows10OrGreater())
 	{
-		return D3D11CreateDeviceAndSwapChain(/*pAdapter*/nullptr, /*DriverType*/ D3D_DRIVER_TYPE_HARDWARE, Software, Flags | D3D11_CREATE_DEVICE_BGRA_SUPPORT, pFeatureLevels, FeatureLevels/*nullptr, 0*/, SDKVersion, pSwapChainDesc, ppSwapChain, ppDevice, pFeatureLevel, ppImmediateContext);
+		return D3D11CreateDeviceAndSwapChain(/*pAdapter*/pAdapter, /*DriverType*/ pAdapter ? D3D_DRIVER_TYPE_UNKNOWN : D3D_DRIVER_TYPE_HARDWARE, Software, Flags | D3D11_CREATE_DEVICE_BGRA_SUPPORT, pFeatureLevels, FeatureLevels/*nullptr, 0*/, SDKVersion, pSwapChainDesc, ppSwapChain, ppDevice, pFeatureLevel, ppImmediateContext);
 	}
 
-	HRESULT hr = D3D11CreateDevice(/*pAdapter*/nullptr, /*DriverType*/ D3D_DRIVER_TYPE_HARDWARE, Software, Flags | D3D11_CREATE_DEVICE_BGRA_SUPPORT/* | D3D11_CREATE_DEVICE_DEBUG*/, pFeatureLevels, FeatureLevels/*nullptr, 0*/, SDKVersion, ppDevice, pFeatureLevel, ppImmediateContext);
+	OnFlipModelHook(&g_useFlipModel);
+
+	HRESULT hr = D3D11CreateDevice(pAdapter, /*DriverType*/ pAdapter ? D3D_DRIVER_TYPE_UNKNOWN : D3D_DRIVER_TYPE_HARDWARE, Software, Flags | D3D11_CREATE_DEVICE_BGRA_SUPPORT/* | D3D11_CREATE_DEVICE_DEBUG*/, pFeatureLevels, FeatureLevels/*nullptr, 0*/, SDKVersion, ppDevice, pFeatureLevel, ppImmediateContext);
 
 	WRL::ComPtr<IDXGIFactory2> dxgiFactory;
 
 	WRL::ComPtr<IDXGIDevice> dxgiDevice;
 	WRL::ComPtr<IDXGIAdapter> dxgiAdapter;
+
+	static HostSharedData<CfxState> initState("CfxInitState");
 
 	if (SUCCEEDED(hr))
 	{
@@ -135,17 +480,18 @@ static HRESULT CreateD3D11DeviceWrap(_In_opt_ IDXGIAdapter* pAdapter, D3D_DRIVER
 		scDesc1.SampleDesc = pSwapChainDesc->SampleDesc;
 		scDesc1.SwapEffect = pSwapChainDesc->SwapEffect;
 
-		/*
-		// probe if DXGI 1.5 is available (Win10 RS1+)
-		WRL::ComPtr<IDXGIFactory5> factory5;
-
-		if (SUCCEEDED(dxgiFactory.As(&factory5)))
+		if (g_useFlipModel)
 		{
-			scDesc1.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
-			scDesc1.Flags |= DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
-			g_allowTearing = true;
+			// probe if DXGI 1.5 is available (Win10 RS1+)
+			WRL::ComPtr<IDXGIFactory5> factory5;
+
+			if (SUCCEEDED(dxgiFactory.As(&factory5)))
+			{
+				scDesc1.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+				scDesc1.Flags |= DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
+				g_allowTearing = true;
+			}
 		}
-		*/
 
 		g_swapChainFlags = scDesc1.Flags;
 
@@ -155,14 +501,32 @@ static HRESULT CreateD3D11DeviceWrap(_In_opt_ IDXGIAdapter* pAdapter, D3D_DRIVER
 		fsDesc.ScanlineOrdering = pSwapChainDesc->BufferDesc.ScanlineOrdering;
 		fsDesc.Windowed = pSwapChainDesc->Windowed;
 
+		if (!fsDesc.Windowed)
+		{
+			fsDesc.Windowed = true;
+		}
+
 		OnTryCreateSwapChain(dxgiFactory.Get(), *ppDevice, pSwapChainDesc->OutputWindow, &scDesc1, &fsDesc, &swapChain1);
 
 		if (!swapChain1)
 		{
-			dxgiFactory->CreateSwapChainForHwnd(*ppDevice, pSwapChainDesc->OutputWindow, &scDesc1, &fsDesc, nullptr, &swapChain1);
+			if (!initState->isReverseGame)
+			{
+				dxgiFactory->CreateSwapChainForHwnd(*ppDevice, pSwapChainDesc->OutputWindow, &scDesc1, &fsDesc, nullptr, &swapChain1);
+				swapChain1->QueryInterface(__uuidof(IDXGISwapChain), (void**)ppSwapChain);
+			}
 		}
 
-		swapChain1->QueryInterface(__uuidof(IDXGISwapChain), (void**)ppSwapChain);
+		if (initState->isReverseGame)
+		{
+			auto sc = WRL::Make<BufferBackedDXGISwapChain>(*ppDevice, *pSwapChainDesc);
+			sc.CopyTo(ppSwapChain);
+		}
+		else if (!pSwapChainDesc->Windowed)
+		{
+			auto sc = WRL::Make<DeferredFullscreenSwapChain>(*ppSwapChain);
+			sc.CopyTo(ppSwapChain);
+		}
 	}
 
 	// patch stuff here as only now do we know swapchain flags
@@ -172,11 +536,32 @@ static HRESULT CreateD3D11DeviceWrap(_In_opt_ IDXGIAdapter* pAdapter, D3D_DRIVER
 	hook::put<uint32_t>(pattern.get(1).get<void>(4), g_swapChainFlags | 2);
 
 	// we assume all users will stop using the object by the time it is dereferenced
-	g_swapChain1 = swapChain1.Get();
+	if (!initState->isReverseGame)
+	{
+		g_swapChain1 = swapChain1.Get();
+	}
 
 	g_dc = *ppImmediateContext;
 
 	return hr;
+}
+
+static HRESULT CreateD3D11DeviceWrap(_In_opt_ IDXGIAdapter* pAdapter, D3D_DRIVER_TYPE DriverType, HMODULE Software, UINT Flags, _In_reads_opt_(FeatureLevels) CONST D3D_FEATURE_LEVEL* pFeatureLevels, UINT FeatureLevels, UINT SDKVersion, _In_opt_ CONST DXGI_SWAP_CHAIN_DESC* pSwapChainDesc, _Out_opt_ IDXGISwapChain** ppSwapChain, _Out_opt_ ID3D11Device** ppDevice, _Out_opt_ D3D_FEATURE_LEVEL* pFeatureLevel, _Out_opt_ ID3D11DeviceContext** ppImmediateContext)
+{
+	HANDLE hEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
+	HRESULT hresult = E_FAIL;
+
+	WakeWindowThreadFor([&]()
+	{
+		hresult = CreateD3D11DeviceWrapOrig(pAdapter, DriverType, Software, Flags, pFeatureLevels, FeatureLevels, SDKVersion, pSwapChainDesc, ppSwapChain, ppDevice, pFeatureLevel, ppImmediateContext);
+
+		SetEvent(hEvent);
+	});
+
+	WaitForSingleObject(hEvent, INFINITE);
+	CloseHandle(hEvent);
+
+	return hresult;
 }
 
 struct VideoModeInfo
@@ -218,6 +603,8 @@ void WrapCreateBackbuffer(void* tf)
 {
 	trace("Creating backbuffer.\n");
 
+	g_lastBackbufTexture = NULL;
+
 	g_origCreateBackbuffer(tf);
 
 	trace("Done creating backbuffer.\n");
@@ -229,7 +616,11 @@ bool WrapVideoModeChange(VideoModeInfo* info)
 
 	for (auto& res : g_resources)
 	{
-		(*res)->Release();
+		if (*res)
+		{
+			(*res)->Release();
+		}
+
 		*res = nullptr;
 	}
 
@@ -512,11 +903,11 @@ struct GameRenderData
 	}
 };
 
-// 1365
-// 1604
+static rage::grcRenderTargetDX11** g_backBuffer;
+
 static auto GetBackbuf()
 {
-	return *(rage::grcRenderTargetDX11 * *)hook::get_adjusted(0x142AD7A88);
+	return *g_backBuffer;
 }
 
 void RenderBufferToBuffer(ID3D11RenderTargetView* rtv, int width = 0, int height = 0)
@@ -560,10 +951,13 @@ void RenderBufferToBuffer(ID3D11RenderTargetView* rtv, int width = 0, int height
 			GetD3D11Device()->CreatePixelShader(quadPS, sizeof(quadPS), nullptr, &ps);
 		});
 
-		ID3DUserDefinedAnnotation* pPerf;
+		ID3DUserDefinedAnnotation* pPerf = NULL;
 		GetD3D11DeviceContext()->QueryInterface(__uuidof(pPerf), reinterpret_cast<void**>(&pPerf));
 
-		pPerf->BeginEvent(L"DrawRenderTexture");
+		if (pPerf)
+		{
+			pPerf->BeginEvent(L"DrawRenderTexture");
+		}
 
 		auto deviceContext = GetD3D11DeviceContext();
 
@@ -668,9 +1062,12 @@ void RenderBufferToBuffer(ID3D11RenderTargetView* rtv, int width = 0, int height
 			oldLayout->Release();
 		}
 
-		pPerf->EndEvent();
+		if (pPerf)
+		{
+			pPerf->EndEvent();
 
-		pPerf->Release();
+			pPerf->Release();
+		}
 	}
 }
 
@@ -808,9 +1205,15 @@ void CaptureInternalScreenshot()
 
 void CaptureBufferOutput()
 {
+	if (launch::IsSDKGuest())
+	{
+		return;
+	}
+
 	static HostSharedData<GameRenderData> handleData("CfxGameRenderHandle");
 
 	static D3D11_TEXTURE2D_DESC resDesc;
+	static int lastWidth, lastHeight;
 
 	auto backBuf = GetBackbuf();
 
@@ -825,10 +1228,32 @@ void CaptureBufferOutput()
 		}
 	}
 
+	bool change = false;
 	static ID3D11Texture2D* myTexture;
 	static ID3D11RenderTargetView* rtv;
 
-	if (!myTexture)
+	if (lastWidth != handleData->width || lastHeight != handleData->height || g_lastBackbufTexture != backBuf->texture)
+	{
+		lastWidth = handleData->width;
+		lastHeight = handleData->height;
+		g_lastBackbufTexture = backBuf->texture;
+
+		if (rtv)
+		{
+			rtv->Release();
+			rtv = NULL;
+		}
+
+		if (myTexture)
+		{
+			myTexture->Release();
+			myTexture = NULL;
+		}
+
+		change = true;
+	}
+
+	if (change)
 	{
 		D3D11_TEXTURE2D_DESC texDesc = { 0 };
 		texDesc.Width = resDesc.Width;
@@ -847,6 +1272,7 @@ void CaptureBufferOutput()
 		HRESULT hr = GetD3D11Device()->CreateTexture2D(&texDesc, nullptr, &d3dTex);
 		if FAILED(hr)
 		{
+			return;
 			// error handling code
 		}
 
@@ -876,6 +1302,11 @@ void CaptureBufferOutput()
 		g_resources.push_back((ID3D11Resource**)&rtv);
 	}
 
+	if (!rtv || !myTexture)
+	{
+		return;
+	}
+
 	if (!handleData->requested)
 	{
 		return;
@@ -886,30 +1317,58 @@ void CaptureBufferOutput()
 
 void D3DPresent(int syncInterval, int flags)
 {
+#if __has_include(<ENBApi.h>)
+	static auto beforePresent = GetENBProcedure<TPresentHook>("API_BeforePresent");
+	static auto afterPresent = GetENBProcedure<TPresentHook>("API_AfterPresent");
+
+	if (beforePresent)
+	{
+		beforePresent();
+	}
+#endif
+
 	if (g_overrideVsync)
 	{
 		syncInterval = 1;
 	}
 
-	if (syncInterval == 0)
-	{
-		BOOL fullscreen;
+	OnPreD3DPresent(*g_dxgiSwapChain, syncInterval, flags);
 
-		if (SUCCEEDED((*g_dxgiSwapChain)->GetFullscreenState(&fullscreen, nullptr)) && !fullscreen)
+	if (IsWindows10OrGreater())
+	{
+		if (syncInterval == 0)
 		{
-			if (g_allowTearing)
+			BOOL fullscreen;
+
+			if (SUCCEEDED((*g_dxgiSwapChain)->GetFullscreenState(&fullscreen, nullptr)) && !fullscreen)
 			{
-				flags |= DXGI_PRESENT_ALLOW_TEARING;
+				if (g_allowTearing)
+				{
+					flags |= DXGI_PRESENT_ALLOW_TEARING;
+				}
 			}
 		}
+
+		HRESULT hr = (*g_dxgiSwapChain)->Present(syncInterval, flags);
+
+		if (FAILED(hr))
+		{
+			trace("IDXGISwapChain::Present failed: %08x\n", hr);
+		}
 	}
-
-	HRESULT hr = (*g_dxgiSwapChain)->Present(syncInterval, flags);
-
-	if (FAILED(hr))
+	else
 	{
-		trace("IDXGISwapChain::Present failed: %08x\n", hr);
+		(*g_dxgiSwapChain)->Present(syncInterval, flags);
 	}
+
+	OnPostD3DPresent(*g_dxgiSwapChain, syncInterval, flags);
+
+#if __has_include(<ENBApi.h>)
+	if (afterPresent)
+	{
+		afterPresent();
+	}
+#endif
 }
 
 static int Return1()
@@ -921,14 +1380,23 @@ static int Return1()
 
 static void DisplayD3DCrashMessage(HRESULT hr)
 {
-	wchar_t errorBuffer[16384];
+	wchar_t errorBuffer[8192] = { 0 };
 	DXGetErrorDescriptionW(hr, errorBuffer, _countof(errorBuffer));
 
-	FatalError("DirectX encountered an unrecoverable error: %s - %s", ToNarrow(DXGetErrorStringW(hr)), ToNarrow(errorBuffer));
+	auto errorString = DXGetErrorStringW(hr);
+
+	if (!errorString)
+	{
+		errorString = va(L"0x%08x", hr);
+	}
+
+	FatalError("DirectX encountered an unrecoverable error: %s - %s", ToNarrow(errorString), ToNarrow(errorBuffer));
 }
 
 static HRESULT D3DGetData(ID3D11DeviceContext* dc, ID3D11Asynchronous* async, void* data, UINT dataSize, UINT flags)
 {
+	dc->GetData(async, data, dataSize, flags);
+
 	*(int*)data = 1;
 
 	return S_OK;
@@ -946,9 +1414,9 @@ void RagePresentWrap()
 static SRWLOCK g_textureOverridesLock = SRWLOCK_INIT;
 static std::unordered_map<rage::grcTexture*, rage::grcTexture*> g_textureOverrides;
 
-static void(*g_origSetTexture)(void* a1, void* a2, int index, rage::grcTexture* texture);
+static void(*g_origSetTexture)(int a1, int index, rage::grcTexture* texture);
 
-static void SetTextureHook(void* a1, void* a2, int index, rage::grcTexture* texture)
+static void SetTextureHook(int a1, int index, rage::grcTexture* texture)
 {
 	if (texture)
 	{
@@ -967,7 +1435,7 @@ static void SetTextureHook(void* a1, void* a2, int index, rage::grcTexture* text
 		}
 	}
 
-	g_origSetTexture(a1, a2, index, texture);
+	g_origSetTexture(a1, index, texture);
 }
 
 static void(*g_origGrcTextureDtor)(void*);
@@ -998,9 +1466,209 @@ void GfxForceVsync(bool enabled)
 	g_overrideVsync = enabled;
 }
 
+static HWND g_gtaWindow;
+
+static HWND WINAPI HookCreateWindowExW(_In_ DWORD dwExStyle, _In_opt_ LPCWSTR lpClassName, _In_opt_ LPCWSTR lpWindowName, _In_ DWORD dwStyle, _In_ int X, _In_ int Y, _In_ int nWidth, _In_ int nHeight, _In_opt_ HWND hWndParent, _In_opt_ HMENU hMenu, _In_opt_ HINSTANCE hInstance, _In_opt_ LPVOID lpParam)
+{
+	static HostSharedData<ReverseGameData> rgd("CfxReverseGameData");
+
+	auto w = CreateWindowExW(dwExStyle, lpClassName, lpWindowName, WS_POPUP | WS_CLIPSIBLINGS, 0, 0, rgd->width, rgd->height, NULL, hMenu, hInstance, lpParam);
+	
+	g_gtaWindow = w;
+
+	return w;
+}
+
+static HWND WINAPI HookGetForegroundWindow()
+{
+	auto orig = GetForegroundWindow();
+
+	static HostSharedData<ReverseGameData> rgd("CfxReverseGameData");
+
+	if (rgd->mainWindowHandle == orig)
+	{
+		orig = g_gtaWindow;
+	}
+
+	return orig;
+}
+
+static BOOL WINAPI HookShowWindow(HWND, int)
+{
+	return TRUE;
+}
+
+static HWND HookSetFocus(_In_opt_ HWND hWnd)
+{
+	return hWnd;
+}
+
+static HWND HookSetCapture(_In_opt_ HWND hWnd)
+{
+	return NULL;
+}
+
+static INT HookShowCursor(BOOL show)
+{
+	return (show) ? 0 : -1;
+}
+
+static BOOL HookClipCursor(const LPRECT rect)
+{
+	return TRUE;
+}
+
+static BOOL HookGetCursorPos(LPPOINT point)
+{
+	point->x = 24;
+	point->y = 24;
+
+	ClientToScreen(g_gtaWindow, point);
+
+	return TRUE;
+}
+
+static BOOL HookAdjustWindowRect(_Inout_ LPRECT lpRect, _In_ DWORD dwStyle, _In_ BOOL bMenu)
+{
+	return TRUE;
+}
+
+static LONG_PTR SetWindowLongPtrAHook(HWND hWnd,
+	int  nIndex,
+	LONG_PTR dwNewLong)
+{
+	if (nIndex == GWL_STYLE)
+	{
+		dwNewLong &= ~WS_OVERLAPPEDWINDOW;
+		dwNewLong = WS_POPUP;
+	}
+
+	return SetWindowLongPtrA(hWnd, nIndex, dwNewLong);
+}
+
+#include <concurrent_unordered_map.h>
+
+static concurrency::concurrent_unordered_map<void*, bool> g_queriesSetUp;
+static void(*g_origWaitForQuery)(void*);
+
+static void WaitForQueryHook(void* query)
+{
+	if (g_queriesSetUp[query])
+	{
+		g_origWaitForQuery(query);
+	}
+
+	g_queriesSetUp[query] = false;
+}
+
+static void(*g_origSetupQuery)(void*);
+
+static void SetupQueryHook(void* query)
+{
+	// vsync override means we want to live in real time
+	if (g_overrideVsync)
+	{
+		return;
+	}
+
+	g_origSetupQuery(query);
+	g_queriesSetUp[query] = true;
+}
+
+class FakeDXGIOutput : public WRL::RuntimeClass<WRL::RuntimeClassFlags<WRL::ClassicCom>, IDXGIOutput>
+{
+	// Inherited via RuntimeClass
+	virtual HRESULT __stdcall SetPrivateData(REFGUID Name, UINT DataSize, const void* pData) override
+	{
+		return S_OK;
+	}
+	virtual HRESULT __stdcall SetPrivateDataInterface(REFGUID Name, const IUnknown* pUnknown) override
+	{
+		return S_OK;
+	}
+	virtual HRESULT __stdcall GetPrivateData(REFGUID Name, UINT* pDataSize, void* pData) override
+	{
+		return S_OK;
+	}
+	virtual HRESULT __stdcall GetParent(REFIID riid, void** ppParent) override
+	{
+		return S_OK;
+	}
+	virtual HRESULT __stdcall GetDesc(DXGI_OUTPUT_DESC* pDesc) override
+	{
+		pDesc->AttachedToDesktop = TRUE;
+		pDesc->DesktopCoordinates = { 0, 0, 1280, 720 };
+		wcscpy(pDesc->DeviceName, L"DummyDevice");
+		pDesc->Monitor = MonitorFromPoint({ 0, 0 }, 0);
+		pDesc->Rotation = DXGI_MODE_ROTATION_IDENTITY;
+
+		return S_OK;
+	}
+	virtual HRESULT __stdcall GetDisplayModeList(DXGI_FORMAT EnumFormat, UINT Flags, UINT* pNumModes, DXGI_MODE_DESC* pDesc) override
+	{
+		*pNumModes = 1;
+
+		return S_OK;
+	}
+	virtual HRESULT __stdcall FindClosestMatchingMode(const DXGI_MODE_DESC* pModeToMatch, DXGI_MODE_DESC* pClosestMatch, IUnknown* pConcernedDevice) override
+	{
+		return S_OK;
+	}
+	virtual HRESULT __stdcall WaitForVBlank(void) override
+	{
+		return S_OK;
+	}
+	virtual HRESULT __stdcall TakeOwnership(IUnknown* pDevice, BOOL Exclusive) override
+	{
+		return S_OK;
+	}
+	virtual void __stdcall ReleaseOwnership(void) override
+	{
+	}
+	virtual HRESULT __stdcall GetGammaControlCapabilities(DXGI_GAMMA_CONTROL_CAPABILITIES* pGammaCaps) override
+	{
+		return S_OK;
+	}
+	virtual HRESULT __stdcall SetGammaControl(const DXGI_GAMMA_CONTROL* pArray) override
+	{
+		return S_OK;
+	}
+	virtual HRESULT __stdcall GetGammaControl(DXGI_GAMMA_CONTROL* pArray) override
+	{
+		return S_OK;
+	}
+	virtual HRESULT __stdcall SetDisplaySurface(IDXGISurface* pScanoutSurface) override
+	{
+		return S_OK;
+	}
+	virtual HRESULT __stdcall GetDisplaySurfaceData(IDXGISurface* pDestination) override
+	{
+		return S_OK;
+	}
+	virtual HRESULT __stdcall GetFrameStatistics(DXGI_FRAME_STATISTICS* pStats) override
+	{
+		return S_OK;
+	}
+};
+
+static HRESULT FakeOutput(IDXGIAdapter* adap, UINT idx, IDXGIOutput** out)
+{
+	if (idx >= 1)
+	{
+		return DXGI_ERROR_NOT_FOUND;
+	}
+
+	auto output = WRL::Make<FakeDXGIOutput>();
+	output.CopyTo(out);
+
+	return S_OK;
+}
+
 static HookFunction hookFunction([] ()
 {
 	static ConVar<bool> disableRenderingCvar("r_disableRendering", ConVar_None, false, &g_disableRendering);
+
+	g_backBuffer = hook::get_address<decltype(g_backBuffer)>(hook::get_pattern("48 8B D0 48 89 05 ? ? ? ? EB 07 48 8B 15", 6));
 
 	// device creation
 	void* ptrFunc = hook::pattern("E8 ? ? ? ? 84 C0 75 ? B2 01 B9 2F A9 C2 F4").count(1).get(0).get<void>(33);
@@ -1023,31 +1691,43 @@ static HookFunction hookFunction([] ()
 	hook::set_call(&g_origRunGame, ptrFunc);
 	hook::jump(ptrFunc, RunGameWrap);
 
+	// present hook function
+	hook::put(hook::get_address<void*>(hook::get_pattern("48 8B 05 ? ? ? ? 48 85 C0 74 0C 8B 4D 50 8B", 3)), D3DPresent);
+
+	char* fnStart = hook::get_pattern<char>("8B 03 41 BE 01 00 00 00 89 05", -0x47);	
+	g_dxgiSwapChain = hook::get_address<IDXGISwapChain**>(fnStart + 0x127);
+
+	MH_CreateHook(fnStart, WrapVideoModeChange, (void**)&g_origVideoModeChange);
+
+	g_resetVideoMode = hook::get_pattern<std::remove_pointer_t<decltype(g_resetVideoMode)>>("8B 44 24 50 4C 8B 17 44 8B 4E 04 44 8B 06", -0x61);
+
 	// set the present hook
 	if (IsWindows10OrGreater())
 	{
-		// present hook function
-		hook::put(hook::get_address<void*>(hook::get_pattern("48 8B 05 ? ? ? ? 48 85 C0 74 0C 8B 4D 50 8B", 3)), D3DPresent);
-
 		// wrap video mode changing
-		char* fnStart = hook::get_pattern<char>("8B 03 41 BE 01 00 00 00 89 05", -0x47);
-
-		MH_CreateHook(fnStart, WrapVideoModeChange, (void**)&g_origVideoModeChange);
 		MH_CreateHook(hook::get_pattern("57 48 83 EC 20 49 83 63 08 00", -0xB), WrapCreateBackbuffer, (void**)&g_origCreateBackbuffer);
-		MH_EnableHook(MH_ALL_HOOKS);
-
-		g_dxgiSwapChain = hook::get_address<IDXGISwapChain**>(fnStart + 0x127);
-
-		g_resetVideoMode = hook::get_pattern<std::remove_pointer_t<decltype(g_resetVideoMode)>>("8B 44 24 50 4C 8B 17 44 8B 4E 04 44 8B 06", -0x61);
 
 		// remove render thread semaphore checks from buffer resizing
 		/*hook::nop((char*)g_resetVideoMode + 0x48, 5);
 		hook::nop((char*)g_resetVideoMode + 0x163, 5);*/
 	}
 
+	MH_EnableHook(MH_ALL_HOOKS);
+
 	if (g_disableRendering)
 	{
 		hook::jump(hook::get_pattern("84 D2 0F 45 C7 8A D9 89 05", -0x1F), Return1);
+	}
+
+	// force at least one DXGI output when disabled rendering
+	if (g_disableRendering)
+	{
+		uint8_t mov[] = { 0x4C, 0x8D, 0x44, 0x24, 0x40 };
+		auto location = hook::get_pattern<char>("8B D6 48 8B 01 4C 8D 44 24 40 FF 50", 2);
+
+		hook::nop(location, 11);
+		memcpy(location, mov, 5);
+		hook::call(location + 5, FakeOutput);
 	}
 
 	// ignore frozen render device (for PIX and such)
@@ -1083,14 +1763,49 @@ static HookFunction hookFunction([] ()
 
 	// texture overrides
 	MH_Initialize();
-	MH_CreateHook(hook::get_pattern("C8 08 74 05 4C 89 4C C8 08 65 48 8B 0C 25", -0x15), SetTextureHook, (void**)&g_origSetTexture);
+	MH_CreateHook(hook::get_pattern("48 8B CE 48 8B 74 24 38 48 6B C9 2A 48 03 CF", -0x45), SetTextureHook, (void**)&g_origSetTexture);
 	MH_CreateHook(hook::get_pattern("48 8B D9 48 89 01 48 8B 49 28 E8 ? ? ? ? 48 8D", -0xD), grcTextureDtorHook, (void**)&g_origGrcTextureDtor);
 	MH_EnableHook(MH_ALL_HOOKS);
 
-	// query GetData, always return 1 (why even wait for presentation with a really weird Sleep loop?)
+	static HostSharedData<CfxState> initState("CfxInitState");
+
+	if (initState->isReverseGame)
 	{
-		//auto location = hook::get_pattern("48 8B 01 8B FE FF 90 E8 00 00 00", 5);
-		//hook::nop(location, 6);
-		//hook::call(location, D3DGetData);
+		// make window a child
+		hook::iat("user32.dll", HookCreateWindowExW, "CreateWindowExW");
+		hook::iat("user32.dll", HookShowWindow, "ShowWindow");
+		hook::iat("user32.dll", HookGetForegroundWindow, "GetForegroundWindow");
+		hook::iat("user32.dll", HookSetFocus, "SetFocus");
+		hook::iat("user32.dll", HookGetCursorPos, "GetCursorPos");
+		hook::iat("user32.dll", HookSetCapture, "SetCapture");
+		hook::iat("user32.dll", HookShowCursor, "ShowCursor");
+		hook::iat("user32.dll", HookClipCursor, "ClipCursor");
+		//hook::iat("user32.dll", HookAdjustWindowRect, "AdjustWindowRect");
+		hook::iat("user32.dll", SetWindowLongPtrAHook, "SetWindowLongPtrA");
 	}
+
+	// some changes for timing (remove OS yields)
+
+	// present sleeper
+	hook::return_function(hook::get_pattern("0F 2F F0 76 0B  0F 2F F8 76 06 F3 0F 5E F7", -0x8F));
+
+	// disable render queries if in load screen thread
+	MH_Initialize();
+	MH_CreateHook(hook::get_pattern("84 C0 75 E8 48 83 C4 20 5B C3", -0x1F), WaitForQueryHook, (void**)&g_origWaitForQuery);
+	MH_CreateHook(hook::get_pattern("41 3B C3 74 30 4C 63 CB 44", -0x1F), SetupQueryHook, (void**)&g_origSetupQuery);
+	MH_EnableHook(MH_ALL_HOOKS);
+
+	// allow 5 slots for pre-buffer drawing
+	OnPostFrontendRender.Connect([]()
+	{
+		uintptr_t a1;
+		uintptr_t a2;
+
+		EnqueueGenericDrawCommand([](uintptr_t, uintptr_t)
+		{
+			CaptureBufferOutput();
+			CaptureInternalScreenshot();
+		},
+		&a1, &a2);
+	}, INT32_MIN + 5);
 });

@@ -13,10 +13,31 @@
 
 #include <chrono>
 #include <sstream>
+#include <stack>
+
+#include <CoreConsole.h>
+
+#ifndef IS_FXSERVER
+#include <CL2LaunchMode.h>
+#include <CfxSubProcess.h>
+#endif
+
+inline bool UseNode()
+{
+#ifndef IS_FXSERVER
+	return launch::IsSDK();
+#else
+	return true;
+#endif
+}
 
 #ifndef IS_FXSERVER
 static constexpr std::pair<const char*, ManifestVersion> g_scriptVersionPairs[] = {
+#if defined(IS_RDR3)
+	{ "rdr3_universal.js", guid_t{ 0 } }
+#else
 	{ "natives_universal.js", guid_t{ 0 } }
+#endif
 };
 #else
 static constexpr std::pair<const char*, ManifestVersion> g_scriptVersionPairs[] = {
@@ -28,9 +49,9 @@ static constexpr std::pair<const char*, ManifestVersion> g_scriptVersionPairs[] 
 #include <v8-profiler.h>
 #include <libplatform/libplatform.h>
 
-#ifdef IS_FXSERVER
+#include <boost/algorithm/string.hpp>
+
 #include <node.h>
-#endif
 
 #include "UvLoopManager.h"
 
@@ -70,9 +91,7 @@ Isolate* GetV8Isolate();
 
 static Platform* GetV8Platform();
 
-#ifdef IS_FXSERVER
 static node::IsolateData* GetNodeIsolate();
-#endif
 
 struct PointerFieldEntry
 {
@@ -106,9 +125,9 @@ private:
 private:
 	UniquePersistent<Context> m_context;
 
-#ifdef IS_FXSERVER
+	std::unique_ptr<v8::MicrotaskQueue> m_taskQueue;
+
 	node::Environment* m_nodeEnvironment;
-#endif
 
 	std::function<void()> m_tickRoutine;
 
@@ -215,6 +234,14 @@ public:
 		return resourceName;
 	}
 
+	void RunMicrotasks()
+	{
+		if (m_taskQueue)
+		{
+			m_taskQueue->PerformCheckpoint(GetV8Isolate());
+		}
+	}
+
 	const char* AssignStringValue(const Local<Value>& value);
 
 	NS_DECL_ISCRIPTRUNTIME;
@@ -232,6 +259,40 @@ public:
 
 static OMPtr<V8ScriptRuntime> g_currentV8Runtime;
 
+class FxMicrotaskScope
+{
+public:
+	inline FxMicrotaskScope(V8ScriptRuntime* runtime)
+		: m_runtime(runtime)
+	{
+	}
+
+	inline ~FxMicrotaskScope()
+	{
+		m_runtime->RunMicrotasks();
+	}
+
+private:
+	V8ScriptRuntime* m_runtime;
+};
+
+class ScopeDtor
+{
+public:
+	explicit ScopeDtor(std::function<void()>&& fn)
+		: fn(fn)
+	{
+	}
+
+	~ScopeDtor()
+	{
+		fn();
+	}
+
+private:
+	std::function<void()> fn;
+};
+
 class V8PushEnvironment
 {
 private:
@@ -247,9 +308,16 @@ private:
 
 	OMPtr<V8ScriptRuntime> m_lastV8Runtime;
 
+	ScopeDtor m_scoped;
+
+	FxMicrotaskScope m_microtaskScope;
+
 public:
 	inline V8PushEnvironment(V8ScriptRuntime* runtime)
-		: m_pushEnvironment(runtime), m_locker(GetV8Isolate()), m_isolateScope(GetV8Isolate()), m_handleScope(GetV8Isolate()), m_contextScope(runtime->GetContext())
+		: m_pushEnvironment(runtime), m_locker(GetV8Isolate()), m_isolateScope(GetV8Isolate()), m_handleScope(GetV8Isolate()), m_contextScope(runtime->GetContext()), m_microtaskScope(runtime), m_scoped([this]()
+		{
+			g_currentV8Runtime = m_lastV8Runtime;
+		})
 	{
 		m_lastV8Runtime = g_currentV8Runtime;
 		g_currentV8Runtime = runtime;
@@ -257,7 +325,74 @@ public:
 
 	inline ~V8PushEnvironment()
 	{
-		g_currentV8Runtime = m_lastV8Runtime;
+	}
+};
+
+static std::unordered_map<const node::Environment*, V8ScriptRuntime*> g_envRuntimes;
+
+static V8ScriptRuntime* GetEnvRuntime(const node::Environment* env)
+{
+	return g_envRuntimes[env];
+}
+
+class BasePushEnvironment
+{
+public:
+	virtual ~BasePushEnvironment() = default;
+};
+
+class V8LitePushEnvironment : public BasePushEnvironment
+{
+private:
+	fx::PushEnvironment m_pushEnvironment;
+
+	Locker m_locker;
+
+	Isolate::Scope m_isolateScope;
+
+	OMPtr<V8ScriptRuntime> m_lastV8Runtime;
+
+	ScopeDtor m_scoped;
+
+	FxMicrotaskScope m_microtaskScope;
+
+public:
+	inline V8LitePushEnvironment(V8ScriptRuntime* runtime, const node::Environment* env)
+		: m_pushEnvironment(runtime), m_locker(node::GetIsolate(env)), m_isolateScope(node::GetIsolate(env)), m_microtaskScope(runtime), m_scoped([this]()
+		{
+			g_currentV8Runtime = m_lastV8Runtime;
+		})
+	{
+		m_lastV8Runtime = g_currentV8Runtime;
+		g_currentV8Runtime = runtime;
+	}
+
+	inline V8LitePushEnvironment(PushEnvironment&& pushEnv, V8ScriptRuntime* runtime, const node::Environment* env)
+		: m_pushEnvironment(std::move(pushEnv)), m_locker(node::GetIsolate(env)), m_isolateScope(node::GetIsolate(env)), m_microtaskScope(runtime), m_scoped([this]()
+		{
+			g_currentV8Runtime = m_lastV8Runtime;
+		})
+	{
+		m_lastV8Runtime = g_currentV8Runtime;
+		g_currentV8Runtime = runtime;
+	}
+
+	inline ~V8LitePushEnvironment()
+	{
+	}
+};
+
+class V8LiteNoRuntimePushEnvironment : public BasePushEnvironment
+{
+private:
+	Locker m_locker;
+
+	Isolate::Scope m_isolateScope;
+
+public:
+	inline V8LiteNoRuntimePushEnvironment(const node::Environment* env)
+		: m_locker(node::GetIsolate(env)), m_isolateScope(node::GetIsolate(env))
+	{
 	}
 };
 
@@ -286,7 +421,7 @@ const OMPtr<V8ScriptRuntime>& V8ScriptRuntime::GetCurrent()
 void ScriptTraceV(const char* string, fmt::printf_args formatList)
 {
 	auto t = fmt::vsprintf(string, formatList);
-	trace("%s", t);
+	console::Printf(fmt::sprintf("script:%s", V8ScriptRuntime::GetCurrent()->GetResourceName()), "%s", t);
 
 	V8ScriptRuntime::GetCurrent()->GetScriptHost()->ScriptTrace(const_cast<char*>(t.c_str()));
 }
@@ -353,7 +488,7 @@ static void V8_SetTickFunction(const v8::FunctionCallbackInfo<v8::Value>& args)
 		{
 			TryCatch eh(GetV8Isolate());
 
-			Local<Value> value = tickFunction->Call(Null(GetV8Isolate()), 0, nullptr);
+			MaybeLocal<Value> value = tickFunction->Call(runtime->GetContext(), Null(GetV8Isolate()), 0, nullptr);
 
 			if (value.IsEmpty())
 			{
@@ -384,11 +519,11 @@ static void V8_SetEventFunction(const v8::FunctionCallbackInfo<v8::Value>& args)
 			memcpy(inValueBuffer->GetContents().Data(), eventPayload, payloadSize);
 
 			Local<Value> arguments[3];
-			arguments[0] = String::NewFromUtf8(GetV8Isolate(), eventName);
+			arguments[0] = String::NewFromUtf8(GetV8Isolate(), eventName).ToLocalChecked();
 			arguments[1] = Uint8Array::New(inValueBuffer, 0, payloadSize);
-			arguments[2] = String::NewFromUtf8(GetV8Isolate(), eventSource);
+			arguments[2] = String::NewFromUtf8(GetV8Isolate(), eventSource).ToLocalChecked();
 
-			Local<Value> value = function->Call(Null(GetV8Isolate()), 3, arguments);
+			MaybeLocal<Value> value = function->Call(runtime->GetContext(), Null(GetV8Isolate()), 3, arguments);
 
 			if (eh.HasCaught())
 			{
@@ -425,17 +560,19 @@ static void V8_SetCallRefFunction(const v8::FunctionCallbackInfo<v8::Value>& arg
 			arguments[0] = Int32::New(GetV8Isolate(), refId);
 			arguments[1] = Uint8Array::New(inValueBuffer, 0, argsSize);
 
-			Local<Value> value = function->Call(Null(GetV8Isolate()), 2, arguments);
+			MaybeLocal<Value> maybeValue = function->Call(runtime->GetContext(), Null(GetV8Isolate()), 2, arguments);
 
 			if (eh.HasCaught())
 			{
 				String::Utf8Value str(GetV8Isolate(), eh.Exception());
 				String::Utf8Value stack(GetV8Isolate(), eh.StackTrace(runtime->GetContext()).ToLocalChecked());
 
-				trace("Error calling system call ref function in resource %s: %s\nstack:\n%s\n", runtime->GetResourceName(), *str, *stack);
+				ScriptTrace("Error calling system call ref function in resource %s: %s\nstack:\n%s\n", runtime->GetResourceName(), *str, *stack);
 			}
 			else
 			{
+				Local<Value> value = maybeValue.ToLocalChecked();
+
 				if (!value->IsArrayBufferView())
 				{
 					return;
@@ -443,6 +580,11 @@ static void V8_SetCallRefFunction(const v8::FunctionCallbackInfo<v8::Value>& arg
 
 				Local<ArrayBufferView> abv = value.As<ArrayBufferView>();
 				*retvalLength = abv->ByteLength();
+
+				if (*retvalLength > retvalArray.size())
+				{
+					retvalArray.resize(*retvalLength);
+				}
 
 				abv->CopyContents(retvalArray.data(), fwMin(retvalArray.size(), *retvalLength));
 				*retval = retvalArray.data();
@@ -468,14 +610,14 @@ static void V8_SetDeleteRefFunction(const v8::FunctionCallbackInfo<v8::Value>& a
 			Local<Value> arguments[3];
 			arguments[0] = Int32::New(GetV8Isolate(), refId);
 
-			Local<Value> value = function->Call(Null(GetV8Isolate()), 1, arguments);
+			MaybeLocal<Value> value = function->Call(runtime->GetContext(), Null(GetV8Isolate()), 1, arguments);
 
 			if (eh.HasCaught())
 			{
 				String::Utf8Value str(GetV8Isolate(), eh.Exception());
 				String::Utf8Value stack(GetV8Isolate(), eh.StackTrace(runtime->GetContext()).ToLocalChecked());
 
-				trace("Error calling system delete ref function in resource %s: %s\nstack:\n%s\n", runtime->GetResourceName(), *str, *stack);
+				ScriptTrace("Error calling system delete ref function in resource %s: %s\nstack:\n%s\n", runtime->GetResourceName(), *str, *stack);
 			}
 		}
 	}));
@@ -498,20 +640,25 @@ static void V8_SetDuplicateRefFunction(const v8::FunctionCallbackInfo<v8::Value>
 			Local<Value> arguments[3];
 			arguments[0] = Int32::New(GetV8Isolate(), refId);
 
-			Local<Value> value = function->Call(Null(GetV8Isolate()), 1, arguments);
+			MaybeLocal<Value> value = function->Call(runtime->GetContext(), Null(GetV8Isolate()), 1, arguments);
 
 			if (eh.HasCaught())
 			{
 				String::Utf8Value str(GetV8Isolate(), eh.Exception());
 				String::Utf8Value stack(GetV8Isolate(), eh.StackTrace(runtime->GetContext()).ToLocalChecked());
 
-				trace("Error calling system duplicate ref function in resource %s: %s\nstack:\n%s\n", runtime->GetResourceName(), *str, *stack);
+				ScriptTrace("Error calling system duplicate ref function in resource %s: %s\nstack:\n%s\n", runtime->GetResourceName(), *str, *stack);
 			}
 			else
 			{
-				if (value->IsInt32())
+				Local<Value> realValue;
+
+				if (value.ToLocal(&realValue))
 				{
-					return value->Int32Value();
+					if (realValue->IsInt32())
+					{
+						return realValue->Int32Value(runtime->GetContext()).ToChecked();
+					}
 				}
 			}
 
@@ -560,17 +707,19 @@ static void V8_SetStackTraceRoutine(const v8::FunctionCallbackInfo<v8::Value>& a
 				arguments[1] = Null(GetV8Isolate());
 			}
 
-			Local<Value> value = function->Call(Null(GetV8Isolate()), 2, arguments);
+			MaybeLocal<Value> mv = function->Call(runtime->GetContext(), Null(GetV8Isolate()), 2, arguments);
 
 			if (eh.HasCaught())
 			{
 				String::Utf8Value str(GetV8Isolate(), eh.Exception());
 				String::Utf8Value stack(GetV8Isolate(), eh.StackTrace(runtime->GetContext()).ToLocalChecked());
 
-				trace("Error calling system stack trace function in resource %s: %s\nstack:\n%s\n", runtime->GetResourceName(), *str, *stack);
+				ScriptTrace("Error calling system stack trace function in resource %s: %s\nstack:\n%s\n", runtime->GetResourceName(), *str, *stack);
 			}
 			else
 			{
+				Local<Value> value = mv.ToLocalChecked();
+
 				if (!value->IsArrayBufferView())
 				{
 					return;
@@ -578,6 +727,11 @@ static void V8_SetStackTraceRoutine(const v8::FunctionCallbackInfo<v8::Value>& a
 
 				Local<ArrayBufferView> abv = value.As<ArrayBufferView>();
 				*size = abv->ByteLength();
+
+				if (*size > retvalArray.size())
+				{
+					retvalArray.resize(*size);
+				}
 
 				abv->CopyContents(retvalArray.data(), fwMin(retvalArray.size(), *size));
 				*blob = retvalArray.data();
@@ -591,9 +745,9 @@ static void V8_CanonicalizeRef(const v8::FunctionCallbackInfo<v8::Value>& args)
 	V8ScriptRuntime* runtime = GetScriptRuntimeFromArgs(args);
 
 	char* refString;
-	result_t hr = runtime->GetScriptHost()->CanonicalizeRef(args[0]->Int32Value(), runtime->GetInstanceId(), &refString);
+	result_t hr = runtime->GetScriptHost()->CanonicalizeRef(args[0]->Int32Value(runtime->GetContext()).ToChecked(), runtime->GetInstanceId(), &refString);
 
-	args.GetReturnValue().Set(String::NewFromUtf8(GetV8Isolate(), refString));
+	args.GetReturnValue().Set(String::NewFromUtf8(GetV8Isolate(), refString).ToLocalChecked());
 	fwFree(refString);
 }
 
@@ -638,7 +792,18 @@ static void V8_InvokeFunctionReference(const v8::FunctionCallbackInfo<v8::Value>
 	context.arguments[3] = reinterpret_cast<uintptr_t>(&retLength);
 
 	// invoke
-	scriptHost->InvokeNative(context);
+	if (FX_FAILED(scriptHost->InvokeNative(context)))
+	{
+		char* error = "Unknown";
+		scriptHost->GetLastErrorText(&error);
+
+		auto throwException = [&](const std::string& exceptionString)
+		{
+			args.GetIsolate()->ThrowException(Exception::Error(String::NewFromUtf8(args.GetIsolate(), exceptionString.c_str()).ToLocalChecked()));
+		};
+
+		return throwException(error);
+	}
 
 	// get return values
 	Local<ArrayBuffer> outValueBuffer = ArrayBuffer::New(GetV8Isolate(), retLength);
@@ -695,7 +860,6 @@ static void V8_MakeFunctionReference(const v8::FunctionCallbackInfo<v8::Value>& 
 	{
 		data->handle.Reset(GetV8Isolate(), outFn);
 		data->handle.SetWeak(data, FnRefWeakCallback, v8::WeakCallbackType::kParameter);
-		data->handle.MarkIndependent();
 
 		args.GetReturnValue().Set(outFn);
 	}
@@ -747,7 +911,9 @@ struct IntHashGetter
 
 	uint64_t operator()(const v8::FunctionCallbackInfo<v8::Value>& args)
 	{
-		return (args[1]->Uint32Value() | (((uint64_t)args[0]->Uint32Value()) << 32));
+		auto scrt = V8ScriptRuntime::GetCurrent();
+
+		return (args[1]->Uint32Value(scrt->GetContext()).ToChecked() | (((uint64_t)args[0]->Uint32Value(scrt->GetContext()).ToChecked()) << 32));
 	}
 };
 
@@ -761,11 +927,12 @@ static void V8_InvokeNative(const v8::FunctionCallbackInfo<v8::Value>& args)
 	v8::Isolate::Scope isolateScope(GetV8Isolate());
 
 	auto pointerFields = runtime->GetPointerFields();
+	auto isolate = args.GetIsolate();
 
 	// exception thrower
 	auto throwException = [&](const std::string & exceptionString)
 	{
-		args.GetIsolate()->ThrowException(Exception::Error(String::NewFromUtf8(args.GetIsolate(), exceptionString.c_str())));
+		args.GetIsolate()->ThrowException(Exception::Error(String::NewFromUtf8(args.GetIsolate(), exceptionString.c_str()).ToLocalChecked()));
 	};
 
 	// variables to hold state
@@ -804,6 +971,8 @@ static void V8_InvokeNative(const v8::FunctionCallbackInfo<v8::Value>& args)
 		context.numArguments++;
 	};
 
+	auto cxt = runtime->GetContext();
+
 	// the big argument loop
 	for (int i = HashGetter::BaseArgs; i < numArgs; i++)
 	{
@@ -812,7 +981,7 @@ static void V8_InvokeNative(const v8::FunctionCallbackInfo<v8::Value>& args)
 
 		if (arg->IsNumber())
 		{
-			double value = arg->NumberValue();
+			double value = arg->NumberValue(cxt).ToChecked();
 			int64_t intValue = static_cast<int64_t>(value);
 
 			if (intValue == value)
@@ -826,7 +995,7 @@ static void V8_InvokeNative(const v8::FunctionCallbackInfo<v8::Value>& args)
 		}
 		else if (arg->IsBoolean() || arg->IsBooleanObject())
 		{
-			push(arg->BooleanValue());
+			push(arg->BooleanValue(isolate));
 		}
 		else if (arg->IsString())
 		{
@@ -932,14 +1101,19 @@ static void V8_InvokeNative(const v8::FunctionCallbackInfo<v8::Value>& args)
 
 			auto getNumber = [&](int idx)
 			{
-				Local<Value> value = array->Get(idx);
+				Local<Value> value;
+
+				if (!array->Get(cxt, idx).ToLocal(&value))
+				{
+					return NAN;
+				}
 
 				if (value.IsEmpty() || !value->IsNumber())
 				{
 					return NAN;
 				}
 
-				return static_cast<float>(value->NumberValue());
+				return static_cast<float>(value->NumberValue(cxt).ToChecked());
 			};
 
 			if (array->Length() < 2 || array->Length() > 4)
@@ -995,8 +1169,13 @@ static void V8_InvokeNative(const v8::FunctionCallbackInfo<v8::Value>& args)
 		// this should be the last entry, I'd guess
 		else if (arg->IsObject())
 		{
-			Local<Object> object = arg->ToObject();
-			Local<Value> data = object->Get(String::NewFromUtf8(GetV8Isolate(), "__data"));
+			Local<Object> object = arg->ToObject(cxt).ToLocalChecked();
+			Local<Value> data;
+			
+			if (!object->Get(cxt, String::NewFromUtf8(GetV8Isolate(), "__data").ToLocalChecked()).ToLocal(&data))
+			{
+				return throwException("__data field does not contain a number");
+			}
 
 			if (!data.IsEmpty() && data->IsNumber())
 			{
@@ -1005,7 +1184,7 @@ static void V8_InvokeNative(const v8::FunctionCallbackInfo<v8::Value>& args)
 
 				if (n.ToLocal(&number))
 				{
-					push(number->Int32Value());
+					push(number->Int32Value(cxt).ToChecked());
 				}
 			}
 			else
@@ -1024,7 +1203,10 @@ static void V8_InvokeNative(const v8::FunctionCallbackInfo<v8::Value>& args)
 	// invoke the native on the script host
 	if (!FX_SUCCEEDED(scriptHost->InvokeNative(context)))
 	{
-		return throwException(va("Execution of native %016llx in script host failed.", hash));;
+		char* error = "Unknown";
+		scriptHost->GetLastErrorText(&error);
+
+		return throwException(fmt::sprintf("Execution of native %016x in script host failed: %s", hash, error));
 	}
 
 	// padded vector struct
@@ -1073,7 +1255,7 @@ static void V8_InvokeNative(const v8::FunctionCallbackInfo<v8::Value>& args)
 
 			if (str)
 			{
-				returnValue = String::NewFromUtf8(args.GetIsolate(), str);
+				returnValue = String::NewFromUtf8(args.GetIsolate(), str).ToLocalChecked();
 			}
 			else
 			{
@@ -1090,9 +1272,9 @@ static void V8_InvokeNative(const v8::FunctionCallbackInfo<v8::Value>& args)
 			scrVector vector = *reinterpret_cast<scrVector*>(&context.arguments[0]);
 
 			Local<Array> vectorArray = Array::New(args.GetIsolate(), 3);
-			vectorArray->Set(0, Number::New(args.GetIsolate(), vector.x));
-			vectorArray->Set(1, Number::New(args.GetIsolate(), vector.y));
-			vectorArray->Set(2, Number::New(args.GetIsolate(), vector.z));
+			vectorArray->Set(cxt, 0, Number::New(args.GetIsolate(), vector.x));
+			vectorArray->Set(cxt, 1, Number::New(args.GetIsolate(), vector.y));
+			vectorArray->Set(cxt, 2, Number::New(args.GetIsolate(), vector.z));
 
 			returnValue = vectorArray;
 
@@ -1155,9 +1337,9 @@ static void V8_InvokeNative(const v8::FunctionCallbackInfo<v8::Value>& args)
 				scrVector vector = *reinterpret_cast<scrVector*>(&retvals[0]);
 
 				Local<Array> vectorArray = Array::New(args.GetIsolate(), 3);
-				vectorArray->Set(0, Number::New(args.GetIsolate(), vector.x));
-				vectorArray->Set(1, Number::New(args.GetIsolate(), vector.y));
-				vectorArray->Set(2, Number::New(args.GetIsolate(), vector.z));
+				vectorArray->Set(cxt, 0, Number::New(args.GetIsolate(), vector.x));
+				vectorArray->Set(cxt, 1, Number::New(args.GetIsolate(), vector.y));
+				vectorArray->Set(cxt, 2, Number::New(args.GetIsolate(), vector.z));
 
 				returnValue = vectorArray;
 				break;
@@ -1173,7 +1355,7 @@ static void V8_InvokeNative(const v8::FunctionCallbackInfo<v8::Value>& args)
 				Local<Value> oldValue = returnValue;
 
 				returnValue = arrayValue;
-				arrayValue->Set(0, oldValue);
+				arrayValue->Set(cxt, 0, oldValue);
 			}
 
 			while (i < numReturnValues)
@@ -1181,12 +1363,12 @@ static void V8_InvokeNative(const v8::FunctionCallbackInfo<v8::Value>& args)
 				switch (rettypes[i])
 				{
 				case V8MetaFields::PointerValueInt:
-					arrayValue->Set(numResults, Int32::New(args.GetIsolate(), retvals[i]));
+					arrayValue->Set(cxt, numResults, Int32::New(args.GetIsolate(), retvals[i]));
 					i++;
 					break;
 
 				case V8MetaFields::PointerValueFloat:
-					arrayValue->Set(numResults, Number::New(args.GetIsolate(), *reinterpret_cast<float*>(&retvals[i])));
+					arrayValue->Set(cxt, numResults, Number::New(args.GetIsolate(), *reinterpret_cast<float*>(&retvals[i])));
 					i++;
 					break;
 
@@ -1195,11 +1377,11 @@ static void V8_InvokeNative(const v8::FunctionCallbackInfo<v8::Value>& args)
 					scrVector vector = *reinterpret_cast<scrVector*>(&retvals[i]);
 
 					Local<Array> vectorArray = Array::New(args.GetIsolate(), 3);
-					vectorArray->Set(0, Number::New(args.GetIsolate(), vector.x));
-					vectorArray->Set(1, Number::New(args.GetIsolate(), vector.y));
-					vectorArray->Set(2, Number::New(args.GetIsolate(), vector.z));
+					vectorArray->Set(cxt, 0, Number::New(args.GetIsolate(), vector.x));
+					vectorArray->Set(cxt, 1, Number::New(args.GetIsolate(), vector.y));
+					vectorArray->Set(cxt, 2, Number::New(args.GetIsolate(), vector.z));
 
-					arrayValue->Set(numResults, vectorArray);
+					arrayValue->Set(cxt, numResults, vectorArray);
 
 					i += 3;
 					break;
@@ -1243,13 +1425,13 @@ static void V8_GetPointerField(const v8::FunctionCallbackInfo<v8::Value>& args)
 
 			if (MetaField == V8MetaFields::PointerValueFloat)
 			{
-				float value = static_cast<float>(arg->NumberValue());
+				float value = static_cast<float>(arg->NumberValue(runtime->GetContext()).ToChecked());
 
 				pointerField->value = *reinterpret_cast<uint32_t*>(&value);
 			}
 			else if (MetaField == V8MetaFields::PointerValueInt)
 			{
-				intptr_t value = arg->IntegerValue();
+				intptr_t value = arg->IntegerValue(runtime->GetContext()).ToChecked();
 
 				pointerField->value = value;
 			}
@@ -1314,18 +1496,21 @@ static void V8_Trace(const v8::FunctionCallbackInfo<v8::Value>& args)
 		}
 
 		v8::String::Utf8Value str(GetV8Isolate(), args[i]);
-		trace("%s", *str);
+		ScriptTrace("%s", *str);
 	}
 
-	trace("\n");
+	ScriptTrace("\n");
 }
 
 static void V8_GetResourcePath(const v8::FunctionCallbackInfo<v8::Value>& args)
 {
-	V8ScriptRuntime* runtime = GetScriptRuntimeFromArgs(args);
-	auto path = ((fx::Resource*)runtime->GetParentObject())->GetPath();
+	if (UseNode())
+	{
+		V8ScriptRuntime* runtime = GetScriptRuntimeFromArgs(args);
+		auto path = ((fx::Resource*)runtime->GetParentObject())->GetPath();
 
-	args.GetReturnValue().Set(String::NewFromUtf8(args.GetIsolate(), path.c_str(), NewStringType::kNormal, path.size()).ToLocalChecked());
+		args.GetReturnValue().Set(String::NewFromUtf8(args.GetIsolate(), path.c_str(), NewStringType::kNormal, path.size()).ToLocalChecked());
+	}
 }
 
 static void V8_SubmitBoundaryStart(const v8::FunctionCallbackInfo<v8::Value>& args)
@@ -1334,10 +1519,10 @@ static void V8_SubmitBoundaryStart(const v8::FunctionCallbackInfo<v8::Value>& ar
 	auto scrt = GetScriptRuntimeFromArgs(args);
 	auto scriptHost = scrt->GetScriptHost();
 
-	auto val = args[0]->IntegerValue();
+	auto val = args[0]->IntegerValue(scrt->GetContext());
 
 	V8Boundary b;
-	b.hint = val;
+	b.hint = val.ToChecked();
 
 	scriptHost->SubmitBoundaryStart((char*)& b, sizeof(b));
 }
@@ -1348,12 +1533,51 @@ static void V8_SubmitBoundaryEnd(const v8::FunctionCallbackInfo<v8::Value>& args
 	auto scrt = GetScriptRuntimeFromArgs(args);
 	auto scriptHost = scrt->GetScriptHost();
 
-	auto val = args[0]->IntegerValue();
+	auto val = args[0]->IntegerValue(scrt->GetContext());
 
 	V8Boundary b;
-	b.hint = val;
+	b.hint = val.ToChecked();
 
 	scriptHost->SubmitBoundaryEnd((char*)&b, sizeof(b));
+}
+
+class FileOutputStream : public v8::OutputStream {
+public:
+	FileOutputStream(FILE* stream) : stream_(stream) {}
+
+	virtual int GetChunkSize() {
+		return 65536;  // big chunks == faster
+	}
+
+	virtual void EndOfStream() {}
+
+	virtual WriteResult WriteAsciiChunk(char* data, int size) {
+		const size_t len = static_cast<size_t>(size);
+		size_t off = 0;
+
+		while (off < len && !feof(stream_) && !ferror(stream_))
+			off += fwrite(data + off, 1, len - off, stream_);
+
+		return off == len ? kContinue : kAbort;
+	}
+
+private:
+	FILE* stream_;
+};
+
+static void V8_Snap(const v8::FunctionCallbackInfo<v8::Value>& args)
+{
+	FILE* fp = fopen("snap.heapsnapshot", "w");
+	if (fp == NULL) return;
+	const v8::HeapSnapshot* const snap = v8::Isolate::GetCurrent()->GetHeapProfiler()->TakeHeapSnapshot();
+	FileOutputStream stream(fp);
+	snap->Serialize(&stream, v8::HeapSnapshot::kJSON);
+	int err = 0;
+	fclose(fp);
+	// Work around a deficiency in the API.  The HeapSnapshot object is const
+	// but we cannot call HeapProfiler::DeleteAllHeapSnapshots() because that
+	// invalidates _all_ snapshots, including those created by other tools.
+	const_cast<v8::HeapSnapshot*>(snap)->Delete();
 }
 
 static std::pair<std::string, FunctionCallback> g_citizenFunctions[] =
@@ -1371,6 +1595,7 @@ static std::pair<std::string, FunctionCallback> g_citizenFunctions[] =
 	{ "getTickCount", V8_GetTickCount },
 	{ "invokeNative", V8_InvokeNative<StringHashGetter> },
 	{ "invokeNativeByHash", V8_InvokeNative<IntHashGetter> },
+	{ "snap", V8_Snap },
 	{ "startProfiling", V8_StartProfiling },
 	{ "stopProfiling", V8_StopProfiling },
 	// boundary
@@ -1390,13 +1615,11 @@ static std::pair<std::string, FunctionCallback> g_citizenFunctions[] =
 	{ "resultAsString", V8_GetMetaField<V8MetaFields::ResultAsString> },
 	{ "resultAsVector", V8_GetMetaField<V8MetaFields::ResultAsVector> },
 	{ "resultAsObject", V8_GetMetaField<V8MetaFields::ResultAsObject> },
-#ifdef IS_FXSERVER
 	{ "getResourcePath", V8_GetResourcePath },
-#endif
 };
 
 static v8::Handle<v8::Value> Throw(v8::Isolate* isolate, const char* message) {
-	return isolate->ThrowException(v8::String::NewFromUtf8(isolate, message));
+	return isolate->ThrowException(v8::String::NewFromUtf8(isolate, message).ToLocalChecked());
 }
 
 static bool ReadFileData(const v8::FunctionCallbackInfo<v8::Value>& args, std::vector<char>* fileData)
@@ -1435,24 +1658,22 @@ static void V8_Read(const v8::FunctionCallbackInfo<v8::Value>& args)
 		return;
 	}
 
-	Handle<String> str = String::NewFromUtf8(args.GetIsolate(), fileData.data(), String::kNormalString, fileData.size());
+	Handle<String> str = String::NewFromUtf8(args.GetIsolate(), fileData.data(), NewStringType::kNormal, fileData.size()).ToLocalChecked();
 	args.GetReturnValue().Set(str);
 }
 
 struct DataAndPersistent {
 	std::vector<char> data;
-	Persistent<ArrayBuffer> handle;
+	int byte_length;
+	Global<ArrayBuffer> handle;
 };
 
 static void ReadBufferWeakCallback(
-	const v8::WeakCallbackInfo<DataAndPersistent>& data)
-{
-	v8::HandleScope handleScope(data.GetIsolate());
-	v8::Local<ArrayBuffer> v = data.GetParameter()->handle.Get(data.GetIsolate());
-
-	size_t byte_length = v->ByteLength();
+	const v8::WeakCallbackInfo<DataAndPersistent>& data) {
+	int byte_length = data.GetParameter()->byte_length;
 	data.GetIsolate()->AdjustAmountOfExternalAllocatedMemory(
 		-static_cast<intptr_t>(byte_length));
+
 	data.GetParameter()->handle.Reset();
 	delete data.GetParameter();
 }
@@ -1471,14 +1692,13 @@ static void V8_ReadBuffer(const v8::FunctionCallbackInfo<v8::Value>& args)
 	DataAndPersistent* data = new DataAndPersistent;
 	data->data = std::move(fileData);
 
-	Handle<v8::ArrayBuffer> buffer =
-		ArrayBuffer::New(isolate, data->data.data(), data->data.size());
-
+	data->byte_length = data->data.size();
+	Local<v8::ArrayBuffer> buffer = ArrayBuffer::New(isolate, data->data.data(), data->data.size());
 	data->handle.Reset(isolate, buffer);
-	data->handle.SetWeak(data, ReadBufferWeakCallback, v8::WeakCallbackType::kParameter);
-	data->handle.MarkIndependent();
-
+	data->handle.SetWeak(data, ReadBufferWeakCallback,
+		v8::WeakCallbackType::kParameter);
 	isolate->AdjustAmountOfExternalAllocatedMemory(data->data.size());
+
 	args.GetReturnValue().Set(buffer);
 }
 
@@ -1516,7 +1736,7 @@ result_t V8ScriptRuntime::Create(IScriptHost* scriptHost)
 
 	// add a 'print' function as alias for Citizen.trace for testing
 	global->Set(String::NewFromUtf8(GetV8Isolate(), "print", NewStringType::kNormal).ToLocalChecked(),
-				FunctionTemplate::New(GetV8Isolate(), V8_Trace));
+	FunctionTemplate::New(GetV8Isolate(), V8_Trace));
 
 	// create Citizen call routines
 	Local<ObjectTemplate> citizenObject = ObjectTemplate::New(GetV8Isolate());
@@ -1529,34 +1749,85 @@ result_t V8ScriptRuntime::Create(IScriptHost* scriptHost)
 
 	// set the Citizen object
 	global->Set(String::NewFromUtf8(GetV8Isolate(), "Citizen", NewStringType::kNormal).ToLocalChecked(),
-				citizenObject);
+	citizenObject);
 
 	// create a V8 context and store it
-	Local<Context> context = Context::New(GetV8Isolate(), nullptr, global);
+	m_taskQueue = v8::MicrotaskQueue::New(GetV8Isolate(), MicrotasksPolicy::kExplicit);
+
+	Local<Context> context = Context::New(GetV8Isolate(), nullptr, global, {}, {}, m_taskQueue.get());
 	m_context.Reset(GetV8Isolate(), context);
 
 	// run the following entries in the context scope
 	Context::Scope scope(context);
 
+	if (UseNode())
+	{
+		if (console::GetDefaultContext()->GetVariableManager()->FindEntryRaw("txAdminServerMode"))
+		{
+			putenv("NODE_CFX_IS_MONITOR_MODE=1");
+		}
+
+#ifdef _WIN32
 #ifdef IS_FXSERVER
-	const char* execArgv[] = { "--start-node" };
-
-	auto env = node::CreateEnvironment(GetNodeIsolate(), context, 0, nullptr, 1, execArgv);
-	node::LoadEnvironment(env);
-
-	m_nodeEnvironment = env;
+		std::string selfPath = ToNarrow(MakeRelativeCitPath(_P("FXServer.exe")));
+#else
+		std::string selfPath = ToNarrow(MakeCfxSubProcess(L"FXNode.exe"));
 #endif
+#else
+		std::string selfPath = MakeRelativeCitPath(_P("FXServer"));
+#endif
+
+		std::string rootPath = selfPath;
+		boost::algorithm::replace_all(rootPath, "/opt/cfx-server/FXServer", "");
+
+		auto libPath = fmt::sprintf("%s/usr/lib/v8/:%s/lib/:%s/usr/lib/",
+		rootPath,
+		rootPath,
+		rootPath);
+
+		const char* execArgv[] = {
+#ifndef _WIN32
+			"--library-path",
+			libPath.c_str(),
+			"--",
+			selfPath.c_str(),
+#endif
+			"--start-node",
+		};
+
+		const char* argv[] = {
+			selfPath.c_str()
+		};
+
+		node::InitializeContext(context);
+
+		auto env = node::CreateEnvironment(GetNodeIsolate(), context, std::size(argv), argv, std::size(execArgv), execArgv);
+		node::LoadEnvironment(env);
+
+		g_envRuntimes[env] = this;
+
+		m_nodeEnvironment = env;
+	}
 
 	// set global IO functions
 	for (auto& routine : g_globalFunctions)
 	{
 		context->Global()->Set(
+			context,
 			String::NewFromUtf8(GetV8Isolate(), routine.first.c_str(), NewStringType::kNormal).ToLocalChecked(),
-			Function::New(GetV8Isolate(), routine.second, External::New(GetV8Isolate(), this)));
+			Function::New(context, routine.second, External::New(GetV8Isolate(), this)).ToLocalChecked());
 	}
 
+	bool isGreater;
+
 	// set the 'window' variable to the global itself
-	context->Global()->Set(String::NewFromUtf8(GetV8Isolate(), "window", NewStringType::kNormal).ToLocalChecked(), context->Global());
+	context->Global()->Set(context, String::NewFromUtf8(GetV8Isolate(), "global", NewStringType::kNormal).ToLocalChecked(), context->Global());
+
+	if (FX_SUCCEEDED(m_manifestHost->IsManifestVersionV2Between("bodacious", "", &isGreater)) && !isGreater)
+	{
+		// set the 'window' variable to the global itself
+		context->Global()->Set(context, String::NewFromUtf8(GetV8Isolate(), "window", NewStringType::kNormal).ToLocalChecked(), context->Global());
+	}
 
 	std::string nativesBuild = "natives_universal.js";
 
@@ -1600,11 +1871,15 @@ result_t V8ScriptRuntime::Destroy()
 	m_deleteRefRoutine = TDeleteRefRoutine();
 	m_duplicateRefRoutine = TDuplicateRefRoutine();
 
-#ifdef IS_FXSERVER
-	node::FreeEnvironment(m_nodeEnvironment);
-#endif
-
 	fx::PushEnvironment pushed(this);
+
+	if (UseNode())
+	{
+		g_envRuntimes.erase(m_nodeEnvironment);
+
+		node::FreeEnvironment(m_nodeEnvironment);
+	}
+
 	m_context.Reset();
 
 	return FX_S_OK;
@@ -1653,7 +1928,7 @@ result_t V8ScriptRuntime::LoadFileInternal(OMPtr<fxIStream> stream, char* script
 		{
 			String::Utf8Value str(GetV8Isolate(), eh.Exception());
 
-			trace("Error parsing script %s in resource %s: %s\n", scriptFile, GetResourceName(), *str);
+			ScriptTrace("Error parsing script %s in resource %s: %s\n", scriptFile, GetResourceName(), *str);
 
 			// TODO: change?
 			return FX_E_INVALIDARG;
@@ -1721,7 +1996,7 @@ result_t V8ScriptRuntime::RunFileInternal(char* scriptName, std::function<result
 			String::Utf8Value str(GetV8Isolate(), eh.Exception());
 			String::Utf8Value stack(GetV8Isolate(), eh.StackTrace(GetContext()).ToLocalChecked());
 
-			trace("Error loading script %s in resource %s: %s\nstack:\n%s\n", scriptName, GetResourceName(), *str, *stack);
+			ScriptTrace("Error loading script %s in resource %s: %s\nstack:\n%s\n", scriptName, GetResourceName(), *str, *stack);
 
 			// TODO: change?
 			return FX_E_INVALIDARG;
@@ -1746,7 +2021,7 @@ int V8ScriptRuntime::GetInstanceId()
 	return m_instanceId;
 }
 
-int32_t V8ScriptRuntime::HandlesFile(char* fileName)
+int32_t V8ScriptRuntime::HandlesFile(char* fileName, IScriptHostWithResourceData* metadata)
 {
 	return strstr(fileName, ".js") != 0;
 }
@@ -1756,8 +2031,10 @@ result_t V8ScriptRuntime::Tick()
 	if (m_tickRoutine)
 	{
 		V8PushEnvironment pushed(this);
-
-		v8::platform::PumpMessageLoop(GetV8Platform(), GetV8Isolate());
+		if (!UseNode())
+		{
+			v8::platform::PumpMessageLoop(GetV8Platform(), GetV8Isolate());
+		}
 
 		m_tickRoutine();
 	}
@@ -1851,27 +2128,12 @@ result_t V8ScriptRuntime::WalkStack(char* boundaryStart, uint32_t boundaryStartL
 	return FX_S_OK;
 }
 
-// from the V8 example
-class ArrayBufferAllocator : public v8::ArrayBuffer::Allocator
-{
-public:
-	virtual void* Allocate(size_t length) override
-	{
-		void* data = AllocateUninitialized(length);
-		return data == NULL ? data : memset(data, 0, length);
-	}
-	virtual void* AllocateUninitialized(size_t length) override { return malloc(length); }
-	virtual void Free(void* data, size_t) override { free(data); }
-};
-
 class V8ScriptGlobals
 {
 private:
 	Isolate* m_isolate;
 
-#ifdef IS_FXSERVER
 	node::IsolateData* m_nodeData;
-#endif
 
 	std::vector<char> m_nativesBlob;
 
@@ -1882,6 +2144,8 @@ private:
 	std::unique_ptr<v8::ArrayBuffer::Allocator> m_arrayBufferAllocator;
 
 	std::unique_ptr<V8Debugger> m_debugger;
+
+	bool m_inited;
 
 public:
 	V8ScriptGlobals();
@@ -1900,12 +2164,10 @@ public:
 		return m_isolate;
 	}
 
-#ifdef IS_FXSERVER
 	inline node::IsolateData* GetNodeIsolate()
 	{
 		return m_nodeData;
 	}
-#endif
 };
 
 static V8ScriptGlobals g_v8;
@@ -1920,12 +2182,10 @@ static Platform* GetV8Platform()
 	return g_v8.GetPlatform();
 }
 
-#ifdef IS_FXSERVER
 static node::IsolateData* GetNodeIsolate()
 {
 	return g_v8.GetNodeIsolate();
 }
-#endif
 
 static void OnMessage(Local<Message> message, Local<Value> error)
 {
@@ -1937,15 +2197,15 @@ static void OnMessage(Local<Message> message, Local<Value> error)
 
 	for (int i = 0; i < stackTrace->GetFrameCount(); i++)
 	{
-		auto frame = stackTrace->GetFrame(i);
+		auto frame = stackTrace->GetFrame(GetV8Isolate(), i);
 
 		v8::String::Utf8Value sourceStr(GetV8Isolate(), frame->GetScriptNameOrSourceURL());
 		v8::String::Utf8Value functionStr(GetV8Isolate(), frame->GetFunctionName());
 		
-		stack << *sourceStr << "(" << frame->GetLineNumber() << "," << frame->GetColumn() << "): " << *functionStr << "\n";
+		stack << *sourceStr << "(" << frame->GetLineNumber() << "," << frame->GetColumn() << "): " << (*functionStr ? *functionStr : "") << "\n";
 	}
 
-	trace("%s\n%s\n%s\n", *messageStr, stack.str(), *errorStr);
+	ScriptTrace("%s\n%s\n%s\n", *messageStr, stack.str(), *errorStr);
 }
 
 V8ScriptGlobals::V8ScriptGlobals()
@@ -1954,12 +2214,42 @@ V8ScriptGlobals::V8ScriptGlobals()
 
 void V8ScriptGlobals::Initialize()
 {
+	if (m_inited)
+	{
+		return;
+	}
+
+	m_inited = true;
+
 #ifdef _WIN32
 	// initialize startup data
-	auto readBlob = [=] (const std::wstring& name, std::vector<char>& outBlob)
+	auto readBlob = [=](const std::wstring& name, std::vector<char>& outBlob)
 	{
 		FILE* f = _pfopen(MakeRelativeCitPath(_P("citizen/scripting/v8/" + name)).c_str(), _P("rb"));
+
+#ifndef IS_FXSERVER
+		if (!f)
+		{
+			static HostSharedData<CfxState> hostData("CfxInitState");
+			auto cli = va(L"\"%s\" -switchcl",
+				hostData->gameExePath);
+
+			STARTUPINFOW si = { 0 };
+			si.cb = sizeof(si);
+
+			PROCESS_INFORMATION pi;
+
+			if (!CreateProcessW(NULL, const_cast<wchar_t*>(cli), NULL, NULL, FALSE, CREATE_BREAKAWAY_FROM_JOB, NULL, NULL, &si, &pi))
+			{
+				trace("failed to exit: %d\n", GetLastError());
+			}
+
+			_wunlink(MakeRelativeCitPath(L"caches.xml").c_str());
+			TerminateProcess(GetCurrentProcess(), 0);
+		}
+#else
 		assert(f);
+#endif
 
 		fseek(f, 0, SEEK_END);
 		outBlob.resize(ftell(f));
@@ -1980,24 +2270,101 @@ void V8ScriptGlobals::Initialize()
 	static StartupData snapshotBlob;
 	snapshotBlob.data = &m_snapshotBlob[0];
 	snapshotBlob.raw_size = m_snapshotBlob.size();
-	
+
 	V8::SetNativesDataBlob(&nativesBlob);
 	V8::SetSnapshotDataBlob(&snapshotBlob);
 #endif
 
-#ifdef IS_FXSERVER
 	int eac;
 	const char** eav;
 
-	if (g_argc >= 2 && strcmp(g_argv[1], "--start-node") == 0)
+	if (UseNode())
 	{
-		exit(node::Start(g_argc, (char**)g_argv));
-	}
+		bool isStartNode = (g_argc >= 2 && strcmp(g_argv[1], "--start-node") == 0);
+		bool isFxNode = (g_argc >= 1 && strstr(g_argv[0], "FXNode.exe") != nullptr);
+
+		if (isStartNode || isFxNode)
+		{
+			int ec = 0;
+
+			// run in a thread so that pthread attributes take effect on musl-based Linux
+			// (GNU stack size presets do not seem to work here)
+			std::thread([&ec, isStartNode]
+			{
+			// TODO: code duplication with above
+#ifdef _WIN32
+#ifdef IS_FXSERVER
+				std::string selfPath = ToNarrow(MakeRelativeCitPath(_P("FXServer.exe")));
+#else
+				std::string selfPath = ToNarrow(MakeCfxSubProcess(L"FXNode.exe"));
+#endif
+#else
+				std::string selfPath = MakeRelativeCitPath(_P("FXServer"));
 #endif
 
+				std::string rootPath = selfPath;
+				boost::algorithm::replace_all(rootPath, "/opt/cfx-server/FXServer", "");
+
+				auto libPath = fmt::sprintf("%s/usr/lib/v8/:%s/lib/:%s/usr/lib/",
+				rootPath,
+				rootPath,
+				rootPath);
+
+#ifdef _WIN32
+				g_argv[0] = const_cast<char*>(selfPath.c_str());
+#endif
+
+				const char* execArgv[] = {
+#ifndef _WIN32
+					"--library-path",
+					libPath.c_str(),
+					"--",
+					selfPath.c_str(),
+#endif
+					"--start-node",
+				};
+
+				int nextArgc = g_argc;
+
+				std::vector<char*> nextArgv(g_argc);
+				memcpy(nextArgv.data(), g_argv, g_argc * sizeof(*g_argv));
+
+				if (!isStartNode)
+				{
+					nextArgc++;
+					nextArgv.resize(nextArgc);
+
+					// make space for --start-node arg
+					memmove(nextArgv.data() + 2, nextArgv.data() + 1, (g_argc - 1) * sizeof(*g_argv));
+					nextArgv[1] = const_cast<char*>("--start-node");
+				}
+
+				ec = node::Start(nextArgc, nextArgv.data(), std::size(execArgv), const_cast<char**>(execArgv));
+			})
+			.join();
+
+#ifdef _WIN32
+			// newer Node won't play nice
+			TerminateProcess(GetCurrentProcess(), ec);
+#else
+			exit(ec);
+#endif
+		}
+	}
+
+	node::MultiIsolatePlatform* platform = nullptr;
+
 	// initialize platform
-	m_platform = std::unique_ptr<v8::Platform>(v8::platform::CreateDefaultPlatform(0, platform::IdleTaskSupport::kDisabled, platform::InProcessStackDumping::kDisabled));
-	V8::InitializePlatform(m_platform.get());
+	if (!UseNode())
+	{
+		m_platform = std::unique_ptr<v8::Platform>(v8::platform::NewDefaultPlatform(0, platform::IdleTaskSupport::kDisabled, platform::InProcessStackDumping::kDisabled));
+		V8::InitializePlatform(m_platform.get());
+	}
+	else
+	{
+		platform = node::InitializeV8Platform(4);
+		m_platform = std::unique_ptr<v8::Platform>(platform);
+	}
 
 #if 0
 	// set profiling disabled, but timer event logging enabled
@@ -2017,20 +2384,40 @@ void V8ScriptGlobals::Initialize()
 	V8::SetFlagsFromString(flags, strlen(flags));
 
 #ifdef _WIN32
+#ifdef IS_FXSERVER
 	V8::InitializeICUDefaultLocation(ToNarrow(MakeRelativeCitPath(L"dummy")).c_str());
+#else
+	V8::InitializeICUDefaultLocation(ToNarrow(MakeRelativeCitPath(L"dummy")).c_str(),
+	ToNarrow(MakeRelativeCitPath(L"citizen/scripting/v8/icudtl.dat")).c_str());
+#endif
 #endif
 
 	// initialize global V8
 	V8::Initialize();
 
 	// create an array buffer allocator
-	m_arrayBufferAllocator = std::make_unique<ArrayBufferAllocator>();
+	if (!UseNode())
+	{
+		m_arrayBufferAllocator = std::unique_ptr<v8::ArrayBuffer::Allocator>(v8::ArrayBuffer::Allocator::NewDefaultAllocator());
+	}
+	else
+	{
+		m_arrayBufferAllocator = std::unique_ptr<v8::ArrayBuffer::Allocator>(node::ArrayBufferAllocator::Create());
+	}
 
 	// create an isolate
 	Isolate::CreateParams params;
 	params.array_buffer_allocator = m_arrayBufferAllocator.get();
 
-	m_isolate = Isolate::New(params);
+	m_isolate = Isolate::Allocate();
+
+	if (UseNode())
+	{
+		platform->RegisterIsolate(m_isolate, Instance<net::UvLoopManager>::Get()->GetOrCreate(std::string("svMain"))->GetLoop());
+	}
+
+	Isolate::Initialize(m_isolate, params);
+
 	m_isolate->SetFatalErrorHandler([] (const char* location, const char* message)
 	{
 		FatalError("V8 error at %s: %s", location, message);
@@ -2043,20 +2430,125 @@ void V8ScriptGlobals::Initialize()
 	// initialize the debugger
 	m_debugger = std::unique_ptr<V8Debugger>(CreateDebugger(m_isolate));
 
-#ifdef IS_FXSERVER
-	// initialize Node.js
-	Locker locker(m_isolate);
-	Isolate::Scope isolateScope(m_isolate);
-	v8::HandleScope handle_scope(m_isolate);
+	if (UseNode())
+	{
+		// initialize Node.js
+		Locker locker(m_isolate);
+		Isolate::Scope isolateScope(m_isolate);
+		v8::HandleScope handle_scope(m_isolate);
 
-	int argc = 1;
-	const char* argv[] = { "" };
+		static std::stack<std::unique_ptr<BasePushEnvironment>> envStack;
 
-	node::Init(&argc, argv, &eac, &eav);
+		node::SetScopeHandler([](const node::Environment* env)
+		{
+			auto runtime = GetEnvRuntime(env);
 
-	m_nodeData = node::CreateIsolateData(m_isolate, Instance<net::UvLoopManager>::Get()->GetOrCreate(std::string("default"))->GetLoop());
+			if (runtime)
+			{
+				// since the V8 locker might be held by our caller, lock order for V8LitePushEnvironment might not be correct
+				// instead, we will just dare to not push the runtime if we don't need to (and we're already locked)
+
+				// this does mean any callbacks node.js will run on closing are more limited (can't call framework natives)
+				if (v8::Locker::IsLocked(node::GetIsolate(env)))
+				{
+					PushEnvironment pe;
+
+					if (PushEnvironment::TryPush(OMPtr{ runtime }, pe))
+					{
+						envStack.push(std::make_unique<V8LitePushEnvironment>(std::move(pe), runtime, env));
+					}
+					else
+					{
+						envStack.push(std::make_unique<V8LiteNoRuntimePushEnvironment>(env));
+					}
+
+					return;
+				}
+
+				envStack.push(std::make_unique<V8LitePushEnvironment>(runtime, env));
+			}
+			else
+			{
+				envStack.push(std::make_unique<V8LiteNoRuntimePushEnvironment>(env));
+			}
+		},
+		[](const node::Environment* env)
+		{
+			envStack.pop();
+		});
+
+#ifndef IS_FXSERVER
+		std::string selfPath = ToNarrow(MakeCfxSubProcess(L"FXNode.exe"));
 #endif
+
+		std::vector<const char*> args{
+#ifndef IS_FXSERVER
+			selfPath.c_str(),
+#else
+			"",
+#endif
+			"--expose-internals"
+		};
+
+		for (int i = 1; i < g_argc; i++)
+		{
+			if (g_argv[i] && g_argv[i][0] == '-' && strcmp(g_argv[i], "-fxdk") != 0)
+			{
+				args.push_back(g_argv[i]);
+			}
+		}
+
+		int argc = args.size();
+
+		node::Init(&argc, args.data(), &eac, &eav);
+
+		m_nodeData = node::CreateIsolateData(m_isolate, Instance<net::UvLoopManager>::Get()->GetOrCreate(std::string("svMain"))->GetLoop(), platform, (node::ArrayBufferAllocator*)m_arrayBufferAllocator.get());
+	}
 }
+
+#ifndef IS_FXSERVER
+}
+#include <MinHook.h>
+
+static int uv_exepath_custom(char*, int)
+{
+	return -1;
+}
+
+static decltype(&fopen) g_origFopen;
+
+static FILE* fopen_wrap(const char* name, const char* mode)
+{
+	static auto __wfopen = ((decltype(&_wfopen))GetProcAddress(GetModuleHandleW(L"ucrtbase.dll"), "_wfopen"));
+
+	if (name && strstr(name, "icudt"))
+	{
+		return __wfopen(ToWide(name).c_str(), ToWide(mode).c_str());
+	}
+
+	return g_origFopen(name, mode);
+}
+
+void Component_RunPreInit()
+{
+	// since otherwise we'll invoke the game again and again and again
+	auto ep = GetProcAddress(GetModuleHandleW(L"libuv.dll"), "uv_exepath");
+
+	MH_Initialize();
+	MH_CreateHook(ep, uv_exepath_custom, NULL);
+	MH_EnableHook(ep);
+
+	// fopen utf-8 bugfix (for icudt?.dat)
+	auto fopen_ep = GetProcAddress(GetModuleHandleW(L"ucrtbase.dll"), "fopen");
+	MH_CreateHook(fopen_ep, fopen_wrap, (void**)&g_origFopen);
+	MH_EnableHook(fopen_ep);
+
+	fx::g_v8.Initialize();
+}
+
+namespace fx
+{
+#endif
 
 static InitFunction initFunction([]()
 {
@@ -2086,6 +2578,10 @@ V8ScriptGlobals::~V8ScriptGlobals()
 	V8::ShutdownPlatform();*/
 
 	// actually don't, this deadlocks from a global destructor
+	if (UseNode())
+	{
+		m_platform.release();
+	}
 }
 
 // {9C268449-7AF4-4A3B-995A-3B1692E958AC}

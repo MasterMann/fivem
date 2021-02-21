@@ -18,6 +18,9 @@ fwEvent<> OnMainGameFrame;
 fwEvent<> OnCriticalGameFrame;
 fwEvent<> OnFirstLoadCompleted;
 
+fwEvent<> OnBeginGameFrame;
+fwEvent<> OnEndGameFrame;
+
 static int(*g_appState)(void* fsm, int state, void* unk, int type);
 
 int DoAppState(void* fsm, int state, void* unk, int type)
@@ -31,13 +34,21 @@ int DoAppState(void* fsm, int state, void* unk, int type)
 		firstLoadCompleted = true;
 	}
 
+	if (state == 2 && type == 1)
+	{
+		OnBeginGameFrame();
+	}
+
 	return g_appState(fsm, state, unk, type);
+}
+
+static void RunEndGameFrame()
+{
+	OnEndGameFrame();
 }
 
 static void WaitThing(int i)
 {
-	trace("waiting from %p\n", _ReturnAddress());
-
 	Sleep(i);
 }
 
@@ -62,18 +73,18 @@ static void DoGameFrame()
 		g_gameFrameMutex.unlock();
 	}
 
-	if (g_criticalFrameMutex.try_lock())
-	{
-		OnCriticalGameFrame();
-
-		g_criticalFrameMutex.unlock();
-	}
-
 	if (GetCurrentThreadId() == g_mainThreadId)
 	{
 		OnMainGameFrame();
 
 		g_executedOnMainThread = true;
+	}
+
+	if (g_criticalFrameMutex.try_lock())
+	{
+		OnCriticalGameFrame();
+
+		g_criticalFrameMutex.unlock();
 	}
 
 	g_lastGameFrame = timeGetTime();
@@ -82,12 +93,35 @@ static void DoGameFrame()
 
 static bool* g_isD3DInvalid;
 
-// actually: 'should exit game' function called by LookAlive
-static bool OnLookAlive()
+namespace rage
+{
+	static bool(**g_pProjectMainOrDoOneLoop)();
+}
+
+static bool(*g_origLoopFunc)();
+
+static bool LoopFunc()
 {
 	if (Instance<ICoreGameInit>::Get()->GetGameLoaded())
 	{
 		DoGameFrame();
+	}
+
+	return g_origLoopFunc();
+}
+
+// actually: 'should exit game' function called by LookAlive
+static bool OnLookAlive()
+{
+/*	if (Instance<ICoreGameInit>::Get()->GetGameLoaded())
+	{
+		DoGameFrame();
+	}*/
+
+	if (*rage::g_pProjectMainOrDoOneLoop != LoopFunc)
+	{
+		g_origLoopFunc = *rage::g_pProjectMainOrDoOneLoop;
+		*rage::g_pProjectMainOrDoOneLoop = LoopFunc;
 	}
 
 	OnLookAliveFrame();
@@ -137,6 +171,11 @@ static void RunCriticalGameLoop()
 
 static HookFunction hookFunction([] ()
 {
+	{
+		auto location = hook::get_pattern<char>("84 C0 74 0F FF 15 ? ? ? ? 84 C0 75 F6 E8", -9);
+		rage::g_pProjectMainOrDoOneLoop = hook::get_address<decltype(rage::g_pProjectMainOrDoOneLoop)>(location + 15);
+	}
+
 	g_mainThreadId = GetCurrentThreadId();
 
 	void* lookAliveFrameCall = hook::pattern("48 81 EC ? 01 00 00 E8 ? ? ? ? 33 F6 48 8D").count(1).get(0).get<void>(7);
@@ -176,6 +215,9 @@ static HookFunction hookFunction([] ()
 	hook::nop(hook::get_pattern("45 8D 67 01 74 05 41 8B C4", 4), 2);
 
 	std::thread(RunCriticalGameLoop).detach();
+
+	// game end frame (after main thread proc)
+	hook::call(hook::get_pattern("B9 05 00 00 00 E8 ? ? ? ? 48 8D 0D", 5), RunEndGameFrame);
 
 	//__debugbreak();
 });

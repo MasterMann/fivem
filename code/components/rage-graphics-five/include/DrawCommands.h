@@ -75,6 +75,7 @@ namespace rage
 
 		void PopTechnique();
 
+#if 0
 		inline int GetParameter(const char* name)
 		{
 			return m_shader->GetParameter(name);
@@ -94,6 +95,7 @@ namespace rage
 		{
 			return m_shader->SetParameter(this, index, data, size, count);
 		}
+#endif
 	};
 
 	class GFXSPEC_EXPORT_VMT grmShaderFactory
@@ -182,3 +184,6 @@ extern GFXSPEC_EXPORT fwEvent<IDXGIFactory2*, ID3D11Device*, HWND, DXGI_SWAP_CHA
 
 extern GFXSPEC_EXPORT fwEvent<bool*> OnRequestInternalScreenshot;
 extern GFXSPEC_EXPORT fwEvent<const uint8_t*, int, int> OnInternalScreenshot;
+
+extern GFXSPEC_EXPORT fwEvent<IDXGISwapChain*, int, int> OnPreD3DPresent;
+extern GFXSPEC_EXPORT fwEvent<IDXGISwapChain*, int, int> OnPostD3DPresent;

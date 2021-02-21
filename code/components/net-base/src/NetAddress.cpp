@@ -101,6 +101,7 @@ boost::optional<PeerAddress> PeerAddress::FromString(const std::string& str, int
 	else
 	{
 		in_addr addr;
+		in6_addr addr6;
 
 		if (inet_pton(AF_INET, resolveName.c_str(), &addr) == 1)
 		{
@@ -112,6 +113,16 @@ boost::optional<PeerAddress> PeerAddress::FromString(const std::string& str, int
 			inAddr.sin_port = htons(port);
 
 			retval = PeerAddress((sockaddr*)&inAddr, sizeof(inAddr));
+		}
+		else if (inet_pton(AF_INET6, resolveName.c_str(), &addr6) == 1) {
+			sockaddr_in6 in6Addr;
+			memset(&in6Addr, 0, sizeof(in6Addr));
+
+			in6Addr.sin6_family = AF_INET6;
+			in6Addr.sin6_addr = addr6;
+			in6Addr.sin6_port = htons(port);
+
+			retval = PeerAddress((sockaddr*)&in6Addr, sizeof(in6Addr));
 		}
 	}
 
@@ -148,7 +159,7 @@ std::string PeerAddress::GetHost() const
 	EnsureNetInitialized();
 
 	// call inet_ntop on it
-	char stringBuf[256];
+	char stringBuf[256] = { 0 };
 	int family = m_addr.addr.ss_family;
 
 	switch (family)
@@ -159,6 +170,10 @@ std::string PeerAddress::GetHost() const
 
 	case AF_INET6:
 		inet_ntop(AF_INET6, const_cast<in6_addr*>(&m_addr.in6.sin6_addr), stringBuf, sizeof(stringBuf));
+		break;
+
+	default:
+		strcpy(stringBuf, "0.0.0.0");
 		break;
 	}
 

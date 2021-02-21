@@ -7,6 +7,7 @@
 
 #include "StdInc.h"
 
+#include <CrossBuildRuntime.h>
 #include <CoreConsole.h>
 #include "ICoreGameInit.h"
 #include "fiDevice.h"
@@ -61,12 +62,17 @@ public:
 
 		if (m_doInityThings)
 		{
-			NativeInvoke::Invoke<LOAD_SCENE, int>(-426.858f, -957.54f, 3.621f);
-
 			NativeInvoke::Invoke<SHUTDOWN_LOADING_SCREEN, int>();
 			NativeInvoke::Invoke<DO_SCREEN_FADE_IN, int>(0);
 
-			NativeInvoke::Invoke<SET_ENTITY_COORDS, int>(playerPedId, -426.858f, -957.54f, 3.621f);
+			NativeInvoke::Invoke<SET_ENTITY_COORDS, int>(playerPedId, 293.089f, 180.466f, 104.301f);
+			NativeInvoke::Invoke<0x428CA6DBD1094446, int>(NativeInvoke::Invoke<0xD80958FC74E988A6, int>(), false);
+
+			if (Instance<ICoreGameInit>::Get()->HasVariable("editorMode"))
+			{
+				NativeInvoke::Invoke<0x49DA8145672B2725, int>();
+				Instance<ICoreGameInit>::Get()->ClearVariable("editorMode");
+			}
 
 			m_doInityThings = false;
 		}
@@ -168,14 +174,12 @@ static bool DoesLevelHashMatch(void* evaluator, uint32_t* hash)
 	// technically we should verify the hash, as with the above - but as nobody writes DLCs assuming custom levels
 	// we shouldn't care about this at all - non-custom is always MO_JIM_L11 (display label for 'gta5'), custom is never MO_JIM_L11
 
-	trace("level hash match - was custom: %d\n", g_wasLastLevelCustom);
-
 	return (!g_wasLastLevelCustom);
 }
 
 static HookFunction hookFunction([] ()
 {
-	char* levelCaller = hook::pattern("0F 94 C2 C1 C1 10 33 CB 03 D3 89 0D").count(1).get(0).get<char>(46);
+	char* levelCaller = xbr::IsGameBuildOrGreater<2060>() ? hook::pattern("33 D0 81 E2 FF 00 FF 00 33 D1 48").count(1).get(0).get<char>(0x33) : hook::pattern("0F 94 C2 C1 C1 10 33 CB 03 D3 89 0D").count(1).get(0).get<char>(46);
 	char* levelByIndex = hook::get_call(levelCaller);
 
 	hook::set_call(&g_origLoadLevelByIndex, levelCaller);
@@ -196,6 +200,10 @@ static HookFunction hookFunction([] ()
 
 static SpawnThread spawnThread;
 
+#include <concurrent_queue.h>
+
+static concurrency::concurrent_queue<std::function<void()>> g_onShutdownQueue;
+
 static void LoadLevel(const char* levelName)
 {
 	ICoreGameInit* gameInit = Instance<ICoreGameInit>::Get();
@@ -206,7 +214,7 @@ static void LoadLevel(const char* levelName)
 
 	if (!gameInit->GetGameLoaded())
 	{
-		if (!gameInit->HasVariable("storyMode") && !gameInit->HasVariable("localMode"))
+		if ((!gameInit->HasVariable("storyMode") && !gameInit->HasVariable("localMode")) || gameInit->HasVariable("editorMode"))
 		{
 			rage::scrEngine::CreateThread(&spawnThread);
 		}
@@ -215,15 +223,40 @@ static void LoadLevel(const char* levelName)
 		{
 			return true;
 		});
+
+		gameInit->ShAllowed = true;
 	}
 	else
 	{
-		//gameInit->KillNetwork((wchar_t*)1);
+		bool sm = gameInit->HasVariable("storyMode");
+		bool lm = gameInit->HasVariable("localMode");
+		bool em = gameInit->HasVariable("editorMode");
 
-		gameInit->ReloadGame();
+		gameInit->KillNetwork((wchar_t*)1);
+
+		g_onShutdownQueue.push([gameInit, sm, lm, em]()
+		{
+			gameInit->ReloadGame();
+
+			if (sm)
+			{
+				gameInit->SetVariable("storyMode");
+			}
+
+			if (lm)
+			{
+				gameInit->SetVariable("localMode");
+			}
+
+			if (em)
+			{
+				gameInit->SetVariable("editorMode");
+			}
+
+			gameInit->SetVariable("networkInited");
+			gameInit->ShAllowed = true;
+		});
 	}
-
-	gameInit->ShAllowed = true;
 }
 
 class SPResourceMounter : public fx::ResourceMounter
@@ -257,7 +290,7 @@ public:
 				std::string pr = pathRef.substr(1);
 				//network::uri::decode(pr.begin(), pr.end(), std::back_inserter(path));
 
-				resource = m_manager->CreateResource(fragRef);
+				resource = m_manager->CreateResource(fragRef, this);
 				resource->LoadFrom(pr);
 			}
 		}
@@ -288,6 +321,13 @@ static InitFunction initFunction([] ()
 	static ConsoleCommand storyModeyCommand("storymode", []()
 	{
 		Instance<ICoreGameInit>::Get()->SetVariable("storyMode");
+		LoadLevel("gta5");
+	});
+
+	static ConsoleCommand editorModeCommand("replayEditor", []()
+	{
+		Instance<ICoreGameInit>::Get()->SetVariable("localMode");
+		Instance<ICoreGameInit>::Get()->SetVariable("editorMode");
 		LoadLevel("gta5");
 	});
 
@@ -329,4 +369,14 @@ static InitFunction initFunction([] ()
 	{
 		LoadLevel(level.c_str());
 	});
+
+	Instance<ICoreGameInit>::Get()->OnShutdownSession.Connect([]()
+	{
+		std::function<void()> fn;
+
+		while (g_onShutdownQueue.try_pop(fn))
+		{
+			fn();
+		}
+	}, INT32_MAX);
 });

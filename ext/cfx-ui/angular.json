@@ -28,14 +28,15 @@
               ]
             },
             "assets": [
-              "src/assets",
+              "src/assets/languages/",
               "src/favicon.ico"
             ],
             "styles": [
-              "src/styles/global.scss"
+			  "src/styles/global.scss"
             ],
             "scripts": [],
-            "baseHref": "."
+            "baseHref": ".",
+            "webWorkerTsConfig": "tsconfig.worker.json"
           },
           "configurations": {
             "production": {
@@ -120,7 +121,12 @@
           },
           "configurations": {
             "production": {
-              "browserTarget": "cfx-ui:build:production"
+              "browserTarget": "cfx-ui:build:production",
+              "sourceMap": {
+                "scripts": true,
+                "styles": true,
+                "vendor": true
+              }
             },
             "web": {
               "browserTarget": "cfx-ui:build:web"
@@ -161,7 +167,8 @@
           "options": {
             "tsConfig": [
               "src/tsconfig.app.json",
-              "src/tsconfig.spec.json"
+              "src/tsconfig.spec.json",
+              "tsconfig.worker.json"
             ],
             "exclude": []
           }
@@ -178,7 +185,7 @@
   "schematics": {
     "@schematics/angular:component": {
       "prefix": "app",
-      "styleext": "scss"
+      "style": "scss"
     },
     "@schematics/angular:directive": {
       "prefix": "app"

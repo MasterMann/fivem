@@ -3,8 +3,75 @@
 
 #include <Hooking.h>
 
-// 1604 now...!
-#define TRIGGER_EP 0x14175DE00
+#include <CrossBuildRuntime.h>
+
+#if defined(GTA_FIVE) || defined(IS_RDR3)
+inline static uintptr_t GetLauncherTriggerEP()
+{
+	if (getenv("CitizenFX_ToolMode"))
+	{
+		if (wcsstr(GetCommandLineW(), L"launcher.exe"))
+		{
+			// launcher.exe with sha256 hash 0cc0862222ab2a8aa714658aff7d9f5897dfd8eceb0b279ffcda1df9de7e9774
+			return 0x1401F227C;
+		}
+	}
+
+	return 0;
+}
+#endif
+
+#ifdef GTA_FIVE
+inline uintptr_t GetTriggerEP()
+{
+	if (auto ep = GetLauncherTriggerEP(); ep != 0)
+	{
+		return ep;
+	}
+
+	if (Is372())
+	{
+		return 0x141623FC8;
+	}
+
+	if (xbr::IsGameBuild<2189>())
+	{
+		return 0x1417ACE74;
+	}
+
+	if (Is2060())
+	{
+		return 0x141796A34;
+	}
+
+	return 0x14175DE00;
+}
+
+// 1604
+// 1868 now...!
+// 2060 realities
+#define TRIGGER_EP (GetTriggerEP())
+#elif defined(IS_RDR3)
+inline uintptr_t GetTriggerEP()
+{
+	if (auto ep = GetLauncherTriggerEP(); ep != 0)
+	{
+		return ep;
+	}
+
+	if (xbr::IsGameBuild<1355>())
+	{
+		return 0x142DE455C;
+	}
+
+	// 1311.20
+	return 0x142E0F92C;
+}
+
+#define TRIGGER_EP (GetTriggerEP())
+#else
+#define TRIGGER_EP 0xDECEA5ED
+#endif
 
 // on NT pre-6.3 (or 6.2, even), VEHs can't modify debug registers
 // making a new thread for every single block is a bad idea as well, but perf isn't _that_ bad

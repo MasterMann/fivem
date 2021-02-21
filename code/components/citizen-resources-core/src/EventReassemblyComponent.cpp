@@ -17,6 +17,14 @@ void* operator new[](size_t size, size_t alignment, size_t alignmentOffset, cons
 	return ::operator new[](size);
 }
 
+namespace rl
+{
+	bool MessageBuffer::GetLengthHackState()
+	{
+		return false;
+	}
+}
+
 constexpr const uint32_t kPacketSizeBits = 17;
 constexpr const uint32_t kFragmentSize = 1024 - 1;
 constexpr const uint32_t kFragmentSizeBits = 10;
@@ -301,6 +309,11 @@ void EventReassemblyComponentImpl::HandleReceivedPacket(int source, const std::s
 
 	// get the resource manager and eventing component
 	fwRefContainer<fx::ResourceEventManagerComponent> eventManager = m_resourceManager->GetComponent<fx::ResourceEventManagerComponent>();
+
+	if (m_sink->LimitEvent(source))
+	{
+		return;
+	}
 
 	// and queue the event
 	eventManager->QueueEvent(

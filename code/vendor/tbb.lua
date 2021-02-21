@@ -1,13 +1,23 @@
+local a = ...
+
 return {
 	include = function()
 		defines '__TBB_NO_IMPLICIT_LINKAGE=1'
 
 		includedirs "../vendor/tbb/include/"
+
+		if os.istarget('linux') then
+			defines 'TBB_USE_GLIBCXX_VERSION=90200'
+		end
 	end,
 
 	run = function()
 		language "C++"
 		kind "StaticLib"
+
+		if a then
+			staticruntime 'On'
+		end
 
 		includedirs { "../vendor/tbb/src/", "../vendor/tbb/src/rml/include/", "../vendor/tbb/build/vs2013/" }
 

@@ -20,19 +20,36 @@ fwPlatformString GetAbsoluteCitPath()
 {
 	static fwPlatformString citizenPath;
 
-	if (!citizenPath.size())
+	bool installStateChanged = false;
+
+#ifndef IS_FXSERVER
+	static HostSharedData<CfxState> initState("CfxInitState");
+
+	static bool lastInstallState = initState->ranPastInstaller;
+
+	if (initState->ranPastInstaller != lastInstallState)
+	{
+		lastInstallState = initState->ranPastInstaller;
+
+		installStateChanged = true;
+	}
+#endif
+
+	if (!citizenPath.size() || installStateChanged)
 	{
 #ifndef IS_FXSERVER
-		static HostSharedData<CfxState> initState("CfxInitState");
-
-		citizenPath = initState->initPath;
+		citizenPath = initState->GetInitPath();
 
 		// is this a new install, if so, migrate to subdirectory-based Citizen
 		if (initState->ranPastInstaller)
 		{
 			if (GetFileAttributes((citizenPath + L"CoreRT.dll").c_str()) == INVALID_FILE_ATTRIBUTES)
 			{
+#ifdef IS_RDR3
+				if (!CreateDirectory((citizenPath + L"RedM.app").c_str(), nullptr))
+#else
 				if (!CreateDirectory((citizenPath + L"FiveM.app").c_str(), nullptr))
+#endif
 				{
 					DWORD error = GetLastError();
 
@@ -46,7 +63,12 @@ fwPlatformString GetAbsoluteCitPath()
 
 		// is this subdirectory-based Citizen? if so, append the subdirectory
 		{
-			std::wstring subPath = citizenPath + L"FiveM.app";
+			std::wstring subPath = citizenPath +
+#ifdef IS_RDR3
+				L"RedM.app";
+#else
+				L"FiveM.app";
+#endif
 
 			if (GetFileAttributes(subPath.c_str()) != INVALID_FILE_ATTRIBUTES)
 			{
@@ -218,6 +240,9 @@ void AddCrashometryV(const std::string& key, const std::string& format, fmt::pri
 }
 
 #if !defined(COMPILING_SHARED_LIBC)
+
+extern "C" void Win32TrapAndJump64();
+
 void __cdecl _wwassert(
 	_In_z_ wchar_t const* _Message,
 	_In_z_ wchar_t const* _File,
@@ -226,10 +251,9 @@ void __cdecl _wwassert(
 {
 	FatalErrorNoExcept("Assertion failure: %s (%s:%d)", ToNarrow(_Message), ToNarrow(_File), _Line);
 
-#if defined(_M_IX86) || defined(_M_AMD64)
-	DWORD oldProtect;
-	VirtualProtect(_ReturnAddress(), 1, PAGE_EXECUTE_READWRITE, &oldProtect);
-	*(uint8_t*)_ReturnAddress() = 0xCC;
+#if defined(_M_AMD64)
+	__writegsqword(0x38, (uintptr_t)_ReturnAddress());
+	*(void**)_AddressOfReturnAddress() = &Win32TrapAndJump64;
 #else
 #error No architecture for asserts?
 #endif

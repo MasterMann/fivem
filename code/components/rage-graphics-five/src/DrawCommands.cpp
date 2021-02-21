@@ -1,7 +1,9 @@
 #include "StdInc.h"
 #include "DrawCommands.h"
 #include "Hooking.h"
-#include "Rect.h"
+#include "CfxRect.h"
+
+#include <CrossBuildRuntime.h>
 
 #define PURECALL() __asm { jmp _purecall }
 
@@ -231,7 +233,10 @@ static hook::thiscall_stub<void(intptr_t)> popSubShaderUnk([] ()
 static hook::cdecl_stub<void()> popImShaderAndResetParams([] ()
 {
 	// 393-
-	//return hook::get_call(hook::pattern("0F 28 D8 E8 ? ? ? ? 48 8D 4C 24 68 E8 ? ? ? ? 48 8B").count(1).get(0).get<void>(13));
+	if (Is372())
+	{
+		return hook::get_call(hook::pattern("0F 28 D8 E8 ? ? ? ? 48 8D 4C 24 68 E8 ? ? ? ? 48 8B").count(1).get(0).get<void>(13));
+	}
 
 	// 463/505+
 	return hook::get_call(hook::pattern("F3 0F 11 64 24 20 E8 ? ? ? ? 48 8D 8C 24 98").count(1).get(0).get<void>(19));
@@ -249,7 +254,7 @@ void PopDrawBlitImShader()
 // params2 is unused for drawblit, params1 is global color multiplier (default multiplies alpha by 0 :( )
 static hook::cdecl_stub<void(const float[4], const float[4])> setImGenParams([] ()
 {
-	return hook::get_call(hook::pattern("48 8D 4D A7 0F 29 4D A7 0F 29 45 97 E8").count(1).get(0).get<void>(12));
+	return hook::get_call(hook::pattern("48 83 65 5F 00 48 8D 55 FF 48 8D 4D 0F E8 ? ? ? ? 83 65").count(1).get(0).get<void>(13));
 });
 
 static hook::cdecl_stub<void(rage::grcTexture*)> setTextureGtaIm([] ()
@@ -304,6 +309,13 @@ static uint32_t g_realResolution[2];
 
 void GetGameResolution(int& resX, int& resY)
 {
+	if (!g_resolution)
+	{
+		resX = 0;
+		resY = 0;
+		return;
+	}
+
 	resX = g_resolution[0];
 	resY = g_resolution[1];
 
@@ -433,6 +445,11 @@ static int g_d3d11DeviceContextOffset;
 
 ID3D11Device* GetD3D11Device()
 {
+	if (!g_d3d11Device)
+	{
+		return nullptr;
+	}
+
 	return *g_d3d11Device;
 }
 
@@ -441,59 +458,60 @@ ID3D11DeviceContext* GetD3D11DeviceContext()
 	return *(ID3D11DeviceContext**)(*(uintptr_t*)(__readgsqword(88)) + g_d3d11DeviceContextOffset);
 }
 
+#if 0
 namespace rage
 {
 	static hook::cdecl_stub<bool(grmShaderFx*, const char*, void*, bool)> _grmShaderFx_LoadTechnique([]()
 	{
-		// 1604
+		// 1604-unused
 		return (void*)0x141330094;
 	});
 
 	static hook::cdecl_stub<int(grmShaderFx*, int, bool, int)> _grmShaderFx_PushTechnique([]()
 	{
-		// 1604
+		// 1604-unused
 		return (void*)0x14132E0F8;
 	});
 
 	grmShaderFactory* grmShaderFactory::GetInstance()
 	{
-		// 1604
+		// 1604-unused
 		return *(grmShaderFactory**)0x142B40F78;
 	}
 
 	static hook::cdecl_stub<void(grmShaderDef*, int, grmShaderFx*)> _grmShaderDef_PushPass([]()
 	{
-		// 1604
+		// 1604-unused
 		return (void*)0x1412ECD74;
 	});
 
 	static hook::cdecl_stub<void(grmShaderDef*)> _grmShaderDef_PopPass([]()
 	{
-		// 1604
+		// 1604-unused
 		return (void*)0x1412F630C;
 	});
 
 	static hook::cdecl_stub<int(grmShaderDef*, const char*)> _grmShaderDef_GetParameter([]()
 	{
-		// 1604
+		// 1604-unused
 		return (void*)0x141304028;
 	});
 
 	static hook::cdecl_stub<int(grmShaderDef*, const char*)> _grmShaderDef_GetTechnique([]()
 	{
-		// 1604
+		// 1604-unused
 		return (void*)0x141303EAC;
 	});
 
 	static hook::cdecl_stub<void(grmShaderDef*, grmShaderFx*, int, void*)> _grmShaderDef_SetSampler([]()
 	{
-		// 1604
+		// 1604-unused
 		return (void*)0x14130CE88;
 	});
 
 	static hook::cdecl_stub<void(grmShaderDef*, grmShaderFx*, int, const void*, int, int)> _grmShaderDef_SetParameter([]()
 	{
-		// 1604
+		// 1604-unused
 		return (void*)0x14130AB8C;
 	});
 
@@ -549,14 +567,14 @@ namespace rage
 
 	void grmShaderFx::PopTechnique()
 	{
-		// 1604
+		// 1604-unused
 		*(void**)0x142B07F80 = nullptr;
 	}
 }
 
 static hook::cdecl_stub<void(const float*)> _setWorldMatrix([]()
 {
-	// 1604
+	// 1604-unused
 	return (void*)0x141309F58;
 });
 
@@ -586,17 +604,18 @@ void RunScannedEntityList(void* a1, void* a2, void* a3, void* a4, void* a5, void
 
 	g_origRunScannedEntityList(a1, a2, a3, a4, a5, a6, a7);
 }
+#endif
 
 static HookFunction hookFunction([] ()
 {
-	MH_Initialize();
-	// 1604, TEMP/TODO
+	//MH_Initialize();
+	// 1604, TEMP/TODO, unused
 	//MH_CreateHook((void*)0x1404E9884, RenderEntityList, (void**)& g_origRenderEntityList);
-	MH_CreateHook((void*)0x1415955E0, RunScannedEntityList, (void**)&g_origRunScannedEntityList);
+	// -> this MH_CreateHook((void*)0x1415955E0, RunScannedEntityList, (void**)&g_origRunScannedEntityList);
 	//hook::set_call(&g_origRunOnEntityList, )
 	//hook::set_call(&g_origRenderEntityList, 0x1404F3D8D);
 	//hook::call(0x1404F31C8, RenderEntityList);
-	MH_EnableHook(MH_ALL_HOOKS);
+	//MH_EnableHook(MH_ALL_HOOKS);
 
 	char* location = hook::pattern("44 8B CE 33 D2 48 89 0D").count(1).get(0).get<char>(8);
 
@@ -673,4 +692,19 @@ static HookFunction hookFunction([] ()
 		g_realResolution[0] = g_resolution[0];
 		g_realResolution[1] = g_resolution[1];
 	}, -500);
+
+	// set immediate mode vertex limit to 8x what it was (so, 32 MB)
+	{
+		auto location = hook::get_pattern<char>("44 89 74 24 74 89 05 ? ? ? ? 89 44", 5);
+
+		auto refloc = hook::get_address<char*>(location + 2);
+		hook::put<uint32_t>(refloc, 0x4000000);
+
+		auto otherLoc = hook::get_address<uint32_t*>(hook::get_pattern("48 8D 54 24 60 45 33 C0 FF 50 18 8B 05", 13));
+		hook::put<uint32_t>(otherLoc, 0x7FFF8 * 4);
+
+		hook::nop(location, 6); // setter
+		hook::put<uint8_t>(location, 0xB8); // write to eax for later
+		hook::put<uint32_t>(location + 1, 0x4000000);
+	}
 });

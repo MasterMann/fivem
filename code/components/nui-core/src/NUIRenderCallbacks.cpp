@@ -2,171 +2,149 @@
 #include "CefOverlay.h"
 #include "NUIWindowManager.h"
 
-#include <DrawCommands.h>
+extern nui::GameInterface* g_nuiGi;
 
 #include "memdbgon.h"
 
 extern bool g_hasCursor;
+extern bool g_shouldHideCursor;
 extern POINT g_cursorPos;
 
 extern bool g_isDragging;
 
-extern rage::grcTexture* g_cursorTexture;
+extern fwRefContainer<nui::GITexture> g_cursorTexture;
+extern fwEvent<std::chrono::microseconds, std::chrono::microseconds> OnVSync;
 
-static InitFunction initFunction([] ()
+#ifdef USE_NUI_ROOTLESS
+extern std::shared_mutex g_nuiFocusStackMutex;
+extern std::list<std::string> g_nuiFocusStack;
+#endif
+
+static HookFunction initFunction([] ()
 {
-	OnD3DPostReset.Connect([] ()
+#ifndef IS_RDR3
+	OnVSync.Connect([](std::chrono::microseconds, std::chrono::microseconds)
 	{
-		Instance<NUIWindowManager>::Get()->ForAllWindows([=] (fwRefContainer<NUIWindow> window)
+		Instance<NUIWindowManager>::Get()->ForAllWindows([=](fwRefContainer<NUIWindow> window)
 		{
-			window->Invalidate();
+			if (window->GetPaintType() != NUIPaintTypePostRender)
+			{
+				return;
+			}
+
+			window->SendBeginFrame();
 		});
 	});
+#endif
 
-#if defined(GTA_NY)
-	DoWeIgnoreTheFrontend.Connect([] (bool& dw)
+	g_nuiGi->OnRender.Connect([]()
 	{
 		if (nui::HasMainUI())
 		{
-			dw = true;
-		}
-	});
-#endif
-
-	OnPostFrontendRender.Connect([] ()
-	{
-		if (nui::HasMainUI())
-		{
-			nui::GiveFocus(true);
+			nui::GiveFocus("mpMenu", true);
 		}
 
-#if defined(GTA_NY)
-		void(*rendCB)() = [] ()
-		{
-#else
-		uintptr_t a1;
-		uintptr_t a2;
+		nui::OnDrawBackground(nui::HasMainUI());
 
-		EnqueueGenericDrawCommand([] (uintptr_t, uintptr_t)
+		Instance<NUIWindowManager>::Get()->ForAllWindows([](fwRefContainer<NUIWindow> window)
 		{
-#endif
-			if (nui::HasMainUI())
+			window->UpdateFrame();
+		});
+
+		std::map<std::string, fwRefContainer<NUIWindow>> renderWindows;
+
+		Instance<NUIWindowManager>::Get()->ForAllWindows([&renderWindows](fwRefContainer<NUIWindow> window)
+		{
+			if (window->GetPaintType() != NUIPaintTypePostRender)
 			{
-				ClearRenderTarget(true, -1, true, 1.0f, true, -1);
+				return;
 			}
 
-			nui::OnDrawBackground(nui::HasMainUI());
+			renderWindows.insert({ window->GetName(), window });
+		});
 
-			Instance<NUIWindowManager>::Get()->ForAllWindows([] (fwRefContainer<NUIWindow> window)
-			{
-				window->UpdateFrame();
-			});
-
-			Instance<NUIWindowManager>::Get()->ForAllWindows([=] (fwRefContainer<NUIWindow> window)
-			{
-				if (window->GetPaintType() != NUIPaintTypePostRender)
-				{
-					return;
-				}
-
-#ifndef _HAVE_GRCORE_NEWSTATES
-				// set the render state to account for premultiplied alpha
-				SetRenderState(2, 13);
+		std::list<std::string> windowOrder =
+#ifndef USE_NUI_ROOTLESS
+		{
+			"root"
+		}
 #else
-				auto oldBlendState = GetBlendState();
-				SetBlendState(GetStockStateIdentifier(BlendStatePremultiplied));
+		g_nuiFocusStack
 #endif
+		;
 
-				if (window->GetTexture())
-				{
-					SetTextureGtaIm(window->GetTexture());
+		// show on top = render last
+		std::reverse(windowOrder.begin(), windowOrder.end());
 
-					int resX, resY;
-					GetGameResolution(resX, resY);
+		for (const auto& windowName : windowOrder)
+		{
+			auto& window = renderWindows[windowName];
 
-					// we need to subtract 0.5f from each vertex coordinate (half a pixel after scaling) due to the usual half-pixel/texel issue
-					uint32_t color = 0xFFFFFFFF;
-
-#ifndef GTA_FIVE
-					DrawImSprite(-0.5f, -0.5f, resX - 0.5f, resY - 0.5f, 0.0f, 0.0f, 0.0f, 1.0f, 1.0f, &color, 0);
-#else
-					DrawImSprite(0, 0, resX, resY, 0.0f, 0.0f, 1.0f, 1.0f, 0.0f, &color, 0);
-#endif
-				}
-
-				if (window->GetPopupTexture())
-				{
-					SetTextureGtaIm(window->GetPopupTexture());
-
-					uint32_t color = 0xFFFFFFFF;
-					const CefRect& rect = window->GetPopupRect();
-					DrawImSprite(rect.x, rect.y, rect.x + rect.width, rect.y + rect.height, 0.0f, 0.0f, 1.0f, 1.0f, 0.0f, &color, 0);
-				}
-
-#ifdef _HAVE_GRCORE_NEWSTATES
-				SetBlendState(oldBlendState);
-#endif
-			});
-
-			if (nui::HasMainUI() || g_hasCursor)
+			if (!window.GetRef())
 			{
-				POINT cursorPos = g_cursorPos;
+				continue;
+			}
 
-				GetCursorPos(&cursorPos);
-				ScreenToClient(FindWindow(L"grcWindow", nullptr), &cursorPos);
+			if (window->GetTexture().GetRef())
+			{
+				g_nuiGi->SetTexture(window->GetTexture(), true);
 
-#if defined(GTA_NY)
-				if (true)//!GameInit::GetGameLoaded())
-				{
-					SetTextureGtaIm(*(rage::grcTexture**)(0x10C8310));
-				}
-				else
-				{
-					SetTextureGtaIm(*(rage::grcTexture**)(0x18AAC20));
-				}
+				int resX, resY;
+				g_nuiGi->GetGameResolution(&resX, &resY);
+
+				nui::ResultingRectangle rr;
+				rr.color = CRGBA(0xff, 0xff, 0xff, 0xff);
+				rr.rectangle = CRect(0, resY, resX, 0);
+
+				g_nuiGi->DrawRectangles(1, &rr);
+
+				g_nuiGi->UnsetTexture();
+			}
+
+			if (window->GetPopupTexture().GetRef())
+			{
+				g_nuiGi->SetTexture(window->GetPopupTexture(), true);
+
+
+				const CefRect& rect = window->GetPopupRect();
+
+				// we need to subtract 0.5f from each vertex coordinate (half a pixel after scaling) due to the usual half-pixel/texel issue
+				nui::ResultingRectangle rr;
+				rr.color = CRGBA(0xff, 0xff, 0xff, 0xff);
+				rr.rectangle = CRect(rect.x, rect.y + rect.height, rect.x + rect.width, rect.y);
+
+				g_nuiGi->DrawRectangles(1, &rr);
+
+				g_nuiGi->UnsetTexture();
+			}
+		}
+
+		if ((nui::HasMainUI() || g_hasCursor) && !g_shouldHideCursor)
+		{
+			POINT cursorPos = g_cursorPos;
+
+			GetCursorPos(&cursorPos);
+			ScreenToClient(g_nuiGi->GetHWND(), &cursorPos);
+
+			if (g_cursorTexture.GetRef())
+			{
+				g_nuiGi->SetTexture(g_cursorTexture);
 
 				uint32_t color = 0xFFFFFFFF;
-				DrawImSprite((float)cursorPos.x, (float)cursorPos.y, (float)cursorPos.x + 40.0f, (float)cursorPos.y + 40.0f, 0.0f, 0.0f, 0.0f, 1.0f, 1.0f, &color, 0);
-#else
-#if defined(_HAVE_GRCORE_NEWSTATES)
-				auto oldBlendState = GetBlendState();
-				SetBlendState(GetStockStateIdentifier(BlendStateDefault));
-#endif
 
-				if (g_cursorTexture)
+				if (g_isDragging)
 				{
-					SetTextureGtaIm(g_cursorTexture);
-
-					uint32_t color = 0xFFFFFFFF;
-
-					if (g_isDragging)
-					{
-						color = 0xFFAAAAAA;
-					}
-
-					DrawImSprite(cursorPos.x, cursorPos.y, cursorPos.x + 32.0f, cursorPos.y + 32.0f, 0.0f, 0.0f, 0.0f, 1.0f, 1.0f, &color, 0);
+					color = 0xFFAAAAAA;
 				}
 
-#if defined(_HAVE_GRCORE_NEWSTATES)
-				SetBlendState(oldBlendState);
-#endif
-#endif
+				nui::ResultingRectangle rr;
+				rr.color = (g_isDragging) ? CRGBA(0xaa, 0xaa, 0xaa, 0xff) : CRGBA(0xff, 0xff, 0xff, 0xff);
+				rr.rectangle = CRect(cursorPos.x, cursorPos.y, cursorPos.x + 32.0f, cursorPos.y + 32.0f);
+
+				g_nuiGi->DrawRectangles(1, &rr);
+
+				g_nuiGi->UnsetTexture();
 			}
-#if defined(GTA_NY)
-		};
-
-		if (!IsOnRenderThread())
-		{
-			auto dc = new(0) CGenericDC(rendCB);
-
-			dc->Enqueue();
 		}
-		else
-		{
-			rendCB();
-		}
-#else
-		}, &a1, &a2);
-#endif
 	});
 });

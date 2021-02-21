@@ -6,8 +6,6 @@
 		"http-client",
 		"profiles",
 		"vendor:yaml-cpp",
-		"vendor:enet",
-		"vendor:slikenet",
 		"vendor:cpp-url",
 		"ros-patches"
 	],

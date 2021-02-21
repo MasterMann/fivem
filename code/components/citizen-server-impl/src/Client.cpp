@@ -5,7 +5,7 @@
 namespace fx
 {
 	Client::Client(const std::string& guid)
-		: m_guid(guid), m_netId(0xFFFF), m_netBase(-1), m_lastSeen(0), m_hasRouted(false), m_slotId(-1)
+		: m_guid(guid), m_netId(0xFFFF), m_netBase(-1), m_lastSeen(0), m_hasRouted(false), m_slotId(-1), m_dropping(false)
 	{
 
 	}
@@ -28,6 +28,8 @@ namespace fx
 		m_netId = netId;
 
 		OnAssignNetId();
+
+		UpdateCachedPrincipalValues();
 	}
 
 	void Client::SetTcpEndPoint(const std::string& value)
@@ -55,6 +57,16 @@ namespace fx
 			}
 		}
 
+		// new policy (2021-01-17): if the ENet peer has vanished, we shall be dead
+		fx::NetPeerStackBuffer stackBuffer;
+		gscomms_get_peer(GetPeer(), stackBuffer);
+		auto peer = stackBuffer.GetBase();
+
+		if (!peer || peer->GetPing() == -1)
+		{
+			return true;
+		}
+
 		return (msec() - m_lastSeen) > CLIENT_DEAD_TIMEOUT;
 	}
 
@@ -69,7 +81,7 @@ namespace fx
 
 		if (it == m_userData.end())
 		{
-			static const std::any emptyAny;
+			static const std::any& emptyAny = *new std::any();
 			return emptyAny;
 		}
 
@@ -80,7 +92,7 @@ namespace fx
 	{
 		if (m_peer)
 		{
-			gscomms_send_packet(shared_from_this(), *m_peer, channel, buffer, type);
+			gscomms_send_packet(this, *m_peer, channel, buffer, type);
 		}
 	}
 }

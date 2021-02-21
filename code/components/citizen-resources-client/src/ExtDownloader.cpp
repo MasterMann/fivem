@@ -13,7 +13,7 @@
 
 #include <EnvironmentBlockHelpers.h>
 
-#include <boost/filesystem.hpp>
+#include <filesystem>
 
 #include <boost/random/random_device.hpp>
 #include <boost/uuid/random_generator.hpp>
@@ -163,7 +163,7 @@ void ExtDownloaderJsonRpcClient::SendRequest(const std::string& method, const js
 	m_replyHandlers.insert({ idStr, cb });
 
 	websocketpp::lib::error_code ec;
-	c.send(m_connectionHandle, data.dump(), websocketpp::frame::opcode::text, ec);
+	c.send(m_connectionHandle, data.dump(-1, ' ', false, nlohmann::detail::error_handler_t::replace), websocketpp::frame::opcode::text, ec);
 }
 
 std::atomic<int> ExtDownloaderJsonRpcClient::ms_currentId = 0;
@@ -255,7 +255,7 @@ public:
 	{
 		auto gid = GenerateGid();
 
-		auto path = boost::filesystem::path(filePath);
+		auto path = std::filesystem::path(filePath);
 
 		auto headers = json::array();
 

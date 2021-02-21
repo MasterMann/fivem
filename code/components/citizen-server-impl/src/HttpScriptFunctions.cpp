@@ -66,6 +66,7 @@ static InitFunction initFunction([]()
 				options.responseHeaders = responseHeaders;
 				options.responseCode = responseCode;
 				options.timeoutNoResponse = 5000ms;
+				options.followLocation = unpacked.value<bool>("followLocation", true);
 
 				// create token
 				int token = reqToken.fetch_add(1);
@@ -75,11 +76,42 @@ static InitFunction initFunction([]()
 				{
 					if (!success)
 					{
-						evComponent->QueueEvent2("__cfx_internal:httpResponse", {}, token, *responseCode, msgpack::type::nil{}, std::map<std::string, std::string>());
+						evComponent->QueueEvent2("__cfx_internal:httpResponse", {}, token, *responseCode, msgpack::type::nil_t{}, std::map<std::string, std::string>());
 					}
 					else
 					{
-						evComponent->QueueEvent2("__cfx_internal:httpResponse", {}, token, *responseCode, std::string{ data, length }, *responseHeaders);
+						msgpack::zone mz;
+						auto responseHeaderData = std::map<std::string, msgpack::object>();
+						for (auto& [key, value] : *responseHeaders)
+						{
+							if (auto it = responseHeaderData.find(key); it != responseHeaderData.end())
+							{
+								// inefficient, but trivial
+								std::vector<std::string> newVal;
+
+								if (it->second.type != msgpack::type::ARRAY)
+								{
+									newVal = {
+										it->second.as<std::string>(),
+										value
+									};
+								}
+								else
+								{
+									newVal = it->second.as<std::vector<std::string>>();
+									newVal.push_back(value);								
+								}
+
+								responseHeaderData.erase(it);
+								responseHeaderData.emplace(key, msgpack::object{ newVal, mz });
+							}
+							else
+							{
+								responseHeaderData.emplace(key, msgpack::object{ value, mz });
+							}
+						}
+
+						evComponent->QueueEvent2("__cfx_internal:httpResponse", {}, token, *responseCode, std::string{ data, length }, responseHeaderData);
 					}
 				});
 
